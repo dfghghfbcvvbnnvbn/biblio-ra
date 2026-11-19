@@ -1,11 +1,30 @@
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body {
   margin: 0;
+  width: 100%;
   height: 100%;
-  background: #14110f;
+  background: transparent !important;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: #1f1a16;
   overflow: hidden;
+}
+body.demo-mode {
+  background: #14110f !important;
+}
+body > video {
+  position: fixed !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  z-index: 0 !important;
+}
+a-scene, .a-canvas {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 1 !important;
+  background: transparent !important;
+  touch-action: none;
 }
 .hidden { display: none !important; }
 
