@@ -5,6 +5,6 @@
 //  Mentre posi "POSA_AQUI", la web funciona en mode prova (sense base de dades).
 // =====================================================================
 window.SUPABASE_CONFIG = {
-  url: "POSA_AQUI_LA_TEVA_PROJECT_URL",
-  anonKey: "POSA_AQUI_LA_TEVA_ANON_KEY"
+  url: "https://vlzijypfkoacnzqainzb.supabase.co",
+  anonKey: "sb_publishable_fn4Ka1XJejO1xsqI3enINg_yk_W_cjj"
 };
