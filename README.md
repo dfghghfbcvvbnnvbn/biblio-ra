@@ -1,39 +1,49 @@
-# Biblioteca del pati con realidad aumentada
+# Biblioteca en Realidad Aumentada (RA) — Patio del Instituto
 
-Flujo: QR → la web pide la cámara → la cámara reconoce el dibujo → aparece el armario 3D encima del real y se abren las puertas → se toca un libro → se ve su ficha y su estado → si está libre, se puede escoger (pasa a "pendiente de confirmación").
+Aplicación web de **Realidad Aumentada (RA)** que funciona directamente desde el navegador del móvil, sin tener que instalar nada. El proyecto convierte un armario metálico real del patio del instituto en una biblioteca interactiva en 3D. Al escanear un código QR y apuntar con la cámara al dibujo del cartel, los alumnos ven aparecer el armario en 3D, sus puertas se abren y muestran **10 libros** en las baldas para consultar sus datos y pedirlos en tiempo real.
 
-Tecnología: A-Frame + MindAR (reconocimiento de imagen), Supabase (estados) y GitHub Pages (alojamiento gratis con HTTPS).
+---
 
-## Archivos
+## Características principales
 
-| Archivo | Para qué sirve |
-|---|---|
-| `index.html`, `style.css`, `app.js` | La web y la escena AR (no hace falta tocarlos) |
-| `config.js` | **Medidas del armario y del papel, en cm** |
-| `books.js` | **Los 10 libros** (título, autor, resumen, color) |
-| `supabase-config.js` | **URL y clave pública de tu proyecto Supabase** |
-| `data.js` | Conexión con Supabase |
-| `targets.mind` | **Lo tenéis que generar vosotros** (paso 1) |
+- **Sin instalación:** se abre directamente desde un código QR en una web alojada en **GitHub Pages** con **HTTPS** (obligatorio para poder usar la cámara en el móvil).
+- **Reconocimiento de imagen:** detecta el dibujo impreso del cartel mediante **MindAR** usando el archivo `targets.mind`.
+- **Escena 3D interactiva:** creada con **A-Frame**, muestra un armario con dos puertas que se abren, cuatro estantes, texturas y 10 libros con sus portadas.
+- **Actualización en tiempo real:** usa **Supabase** para guardar el estado de cada libro (`lliure`, `pendent`, `escollit`), evitar que dos personas pidan el mismo libro a la vez y mostrar los cambios al instante en todos los móviles.
+- **Modo de pruebas (`?demo=1`):** permite probar la escena 3D en el ordenador sin cámara, moviéndose con las teclas `WASD` y subiendo o bajando con `E` y `Q` para revisar todas las baldas y libros.
 
-## Probar ya, sin nada preparado
+---
 
-Abre `index.html?demo=1` en el ordenador. Verás el armario 3D con las puertas abriéndose y los 10 libros, sin cámara.
+## Cómo funciona
 
-## Pasos para ponerlo en marcha
+1. **Escaneo del QR:** el alumno escanea el código QR del cartel pegado en el armario del patio y abre la web en el móvil.
+2. **Detección del cartel:** la web pide permiso para usar la cámara y **MindAR** reconoce el dibujo del cartel gracias a `targets.mind`.
+3. **Armario 3D y apertura de puertas:** al detectar el dibujo, el armario 3D aparece encima del armario real y abre sus puertas para mostrar los 10 libros.
+4. **Elección de libro:** al tocar un libro, se muestra su información y, si está libre (`lliure`), se puede solicitar.
+5. **Cambio de estado en tiempo real:** al pedir un libro `lliure`, pasa de forma segura a `pendent` y todos los dispositivos conectados ven el cambio al momento. La confirmación final (pasar a `escollit` o devolver a `lliure`) se hace desde el panel de la base de datos.
 
-### 1. El papel (dibujo + QR) y el archivo `targets.mind`
-1. Diseñad el papel: el **dibujo** y el **QR** en la misma hoja, con muchos detalles y contrastes.
-2. Guardad la hoja **tal como la vais a imprimir** como imagen PNG o JPG.
-3. Abrid https://hiukim.github.io/mind-ar-js-doc/tools/compile , subid la imagen, pulsad *Start* y descargad **`targets.mind`**.
-4. Poned `targets.mind` en la misma carpeta que `index.html`.
+---
 
-### 2. Supabase (base de datos sin 2FA)
-1. Crea una cuenta y un proyecto gratis en https://supabase.com.
-2. Entra en **SQL Editor**, pega el bloque SQL de las instrucciones y pulsa **Run** (crea la tabla con los 10 libros en `lliure`).
-3. Entra en **Project Settings → API** (o **Data API / API Keys**) y copia la **Project URL** y la clave **`anon` `public`** dentro de `supabase-config.js`.
-4. Para confirmar un libro como admin: en Supabase abre **Table Editor → `llibres`** y cambia `estat` de `pendent` a `escollit` (o de vuelta a `lliure`).
+## Tecnologías utilizadas
 
-### 3. GitHub Pages
-1. Crea un repositorio público en GitHub y sube todos los archivos de esta carpeta (incluido `targets.mind`).
-2. *Settings → Pages → Branch: main / root → Save*.
-3. Usa la URL `https://TU-USUARIO.github.io/NOMBRE-REPO/` para generar el código QR del cartel.
+| Parte | Herramienta | Para qué se usa |
+| :--- | :--- | :--- |
+| **3D y Realidad Aumentada** | **A-Frame**, **MindAR** | Crear la escena 3D, animar puertas y libros, y detectar el dibujo del cartel (`targets.mind`). |
+| **Base de datos** | **Supabase** | Guardar los estados en la tabla `llibres`, aplicar reglas de seguridad y actualizar cambios al instante (elegido para evitar el requisito de 2FA de Firebase). |
+| **Alojamiento web** | **GitHub Pages** | Publicar los archivos de la web con conexión segura (HTTPS). |
+| **Pruebas en ordenador** | Parámetro `?demo=1` | Moverse libremente por la escena (`WASD`, `E`/`Q`) sin necesitar cámara ni cartel físico. |
+
+---
+
+## Archivos del proyecto
+
+```text
+├── index.html          # Página principal con la escena de RA y 3D
+├── app.js            # Funcionamiento de la RA, toque de libros y tiempo real
+├── style.css         # Diseño visual de la interfaz
+├── config.js         # Medidas del armario en centímetros, baldas y posición del cartel
+├── books.js          # Configuración de los 10 libros
+├── data.js           # Datos de cada libro
+├── supabase-config.js# Conexión con Supabase
+├── targets.mind      # Archivo del dibujo preparado para MindAR
+└── covers/           # Imágenes de las portadas de los 10 libros
