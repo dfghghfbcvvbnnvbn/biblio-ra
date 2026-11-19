@@ -1,0 +1,20 @@
+PORTADAS DE LOS LIBROS
+======================
+
+Poned aquí las imágenes de las portadas con estos nombres:
+
+  l01.jpg  Cómo sobrevivir en un mundo sobremedicado
+  l02.jpg  Hablemos de sexo sin pelos en la lengua
+  l03.jpg  Mi padre me vendió por una deuda de juego
+  l04.jpg  Fruits Basket Another, Vol. 1
+  l05.jpg  ¡Pechos fuera!
+  l06.jpg  Tots els detectius es diuen Flanagan
+  l07.jpg  Odessa i el món secret dels llibres
+  l08.jpg  Una entrega especial
+  l09.jpg  Maddie: La verdad de la mentira
+  l10.jpg  Clásicos para contar
+
+- Solo la portada, recortada, sin fondo ni bordes.
+- Unos 600 píxeles de ancho (~100 KB) para que cargue rápido.
+- El libro en 3D toma la proporción exacta de cada imagen.
+- Si falta alguna, ese libro se ve de color con el título.
