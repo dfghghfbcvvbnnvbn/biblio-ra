@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Biblioteca del pati · RA</title>
+  <link rel="stylesheet" href="style.css">
+
+  <!-- A-Frame + MindAR (realitat augmentada amb imatge) -->
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+
+  <!-- Supabase (base de dades) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+  <!-- Pantalla inicial enfocada a llibres -->
+  <div id="splash">
+    <div class="ambient-books" aria-hidden="true">
+      <span class="float-page p1"></span>
+      <span class="float-page p2"></span>
+      <span class="float-page p3"></span>
+      <span class="float-page p4"></span>
+    </div>
+
+    <div class="splash-card">
+      <div class="splash-badge">
+        <span class="badge-dot"></span>
+        <span>EXPERIÈNCIA RA · PATI</span>
+      </div>
+
+      <!-- Il·lustració animada d'un llibre obert -->
+      <div class="hero-book" aria-hidden="true">
+        <svg viewBox="0 0 140 96" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="coverGrad" x1="0" y1="0" x2="140" y2="96" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#8b4513"/>
+              <stop offset="100%" stop-color="#4a2511"/>
+            </linearGradient>
+            <linearGradient id="pageLeft" x1="16" y1="18" x2="70" y2="78" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#fffdf8"/>
+              <stop offset="100%" stop-color="#eadfcd"/>
+            </linearGradient>
+            <linearGradient id="pageRight" x1="70" y1="18" x2="124" y2="78" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#f5ecdc"/>
+              <stop offset="100%" stop-color="#fffdf8"/>
+            </linearGradient>
+          </defs>
+          <!-- Tapa dura -->
+          <rect x="10" y="18" width="120" height="66" rx="8" fill="url(#coverGrad)"/>
+          <rect x="66" y="18" width="8" height="66" fill="#2e1609"/>
+          <!-- Fulls base -->
+          <path d="M16 20 C36 16, 56 19, 70 25 L70 78 C56 72, 36 69, 16 73 Z" fill="url(#pageLeft)"/>
+          <path d="M124 20 C104 16, 84 19, 70 25 L70 78 C84 72, 104 69, 124 73 Z" fill="url(#pageRight)"/>
+          <!-- Full animat passant -->
+          <path class="turning-leaf" d="M70 25 C84 19, 104 16, 122 20 L122 73 C104 69, 84 72, 70 78 Z" fill="#fffaf0" opacity="0.92"/>
+          <!-- Línies de text -->
+          <line x1="25" y1="33" x2="58" y2="35" stroke="#c7b79e" stroke-width="2" stroke-linecap="round"/>
+          <line x1="25" y1="42" x2="55" y2="44" stroke="#c7b79e" stroke-width="2" stroke-linecap="round"/>
+          <line x1="25" y1="51" x2="50" y2="53" stroke="#c7b79e" stroke-width="2" stroke-linecap="round"/>
+          <line x1="82" y1="35" x2="113" y2="33" stroke="#c7b79e" stroke-width="2" stroke-linecap="round"/>
+          <line x1="82" y1="44" x2="110" y2="42" stroke="#c7b79e" stroke-width="2" stroke-linecap="round"/>
+          <!-- Punt de llibre daurat -->
+          <path d="M98 18 L106 18 L106 42 L102 37 L98 42 Z" fill="#d97736"/>
+        </svg>
+      </div>
+
+      <h1>Biblioteca del pati</h1>
+      <p class="subtitle">Obre l'armari amb realitat augmentada, explora els llibres en 3D i reserva el que vulguis llegir.</p>
+
+      <div class="catalog-pill" id="splash-stats">
+        <span class="stat-icon">📖</span>
+        <span id="splash-count">10 llibres al catàleg</span>
+      </div>
+
+      <div class="steps-grid">
+        <div class="step-item">
+          <div class="step-num">1</div>
+          <div class="step-text"><strong>Activa la càmera</strong> quan t'ho demani el navegador.</div>
+        </div>
+        <div class="step-item">
+          <div class="step-num">2</div>
+          <div class="step-text"><strong>Apunta al cartell</strong> amb el dibuix i el QR enganxat a l'armari.</div>
+        </div>
+        <div class="step-item">
+          <div class="step-num">3</div>
+          <div class="step-text"><strong>Toca qualsevol llibre</strong> per veure'n la portada en 3D i reservar-lo.</div>
+        </div>
+      </div>
+
+      <button id="start" class="primary btn-glow">
+        <span>Obrir càmera i explorar</span>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      </button>
+
+      <a href="?demo=1" class="demo-link" id="demo-btn">O prova la vista 3D sense càmera</a>
+      <p id="splash-msg" class="error hidden"></p>
+    </div>
+  </div>
+
+  <!-- Missatge mentre busca el dibuix -->
+  <div id="hint" class="hidden">
+    <span class="scan-pulse"></span>
+    <span>Apunta la càmera al cartell de l'armari</span>
+  </div>
+
+  <!-- Indicador de mode (demo / sense base de dades) -->
+  <div id="mode-tag" class="hidden"></div>
+
+  <!-- Fitxa del llibre amb animació suau -->
+  <div id="panel" class="panel-closed" aria-hidden="true">
+    <div class="panel-handle" aria-hidden="true"></div>
+    <button id="close" aria-label="Tancar">×</button>
+    <div class="panel-content">
+      <div class="panel-meta">
+        <span id="p-status" class="chip"></span>
+      </div>
+      <h2 id="p-title"></h2>
+      <p id="p-author"></p>
+      <div class="panel-divider"></div>
+      <p id="p-summary"></p>
+      <button id="p-pick" class="primary">Escollir aquest llibre</button>
+      <p id="p-msg"></p>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+
+  <script src="config.js"></script>
+  <script src="books.js"></script>
+  <script src="supabase-config.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
