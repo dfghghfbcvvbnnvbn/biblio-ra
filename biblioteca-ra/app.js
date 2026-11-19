@@ -320,8 +320,14 @@
     };
     if (frontKey) frontAttrs['book-part'] = frontKey;
     if (clickable) {
+      pagesAttrs['class'] = 'clickable';
+      pagesAttrs['data-id'] = b.id;
       frontAttrs['class'] = 'clickable';
       frontAttrs['data-id'] = b.id;
+      backAttrs['class'] = 'clickable';
+      backAttrs['data-id'] = b.id;
+      spineAttrs['class'] = 'clickable';
+      spineAttrs['data-id'] = b.id;
     }
     var front = el('a-box', frontAttrs, parent);
 
@@ -379,6 +385,76 @@
 
     sceneEl = $('scene');
     rootEl = $('root');
+
+    if (DEMO) document.body.classList.add('demo-mode');
+
+    sceneEl.addEventListener('loaded', function () {
+      if (!DEMO && sceneEl.renderer) {
+        sceneEl.renderer.setClearColor(0x000000, 0);
+      }
+      var canvas = sceneEl.canvas;
+      if (!canvas || !window.AFRAME) return;
+
+      var tapStart = null;
+      function handleTapAt(clientX, clientY) {
+        if (!doorsOpen || !$('panel').classList.contains('panel-closed')) return;
+        var camEl = document.querySelector('a-camera');
+        var camObj = camEl && camEl.getObject3D('camera');
+        if (!camObj) return;
+
+        var rect = canvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        var ndc = new AFRAME.THREE.Vector2(
+          ((clientX - rect.left) / rect.width) * 2 - 1,
+          -((clientY - rect.top) / rect.height) * 2 + 1
+        );
+        var ray = new AFRAME.THREE.Raycaster();
+        ray.setFromCamera(ndc, camObj);
+
+        var targets = [];
+        var meshToId = new Map();
+        for (var id in bookEls) {
+          var rec = bookEls[id];
+          if (!rec || !rec.g || !rec.g.object3D || !rec.g.object3D.visible) continue;
+          rec.g.object3D.traverse(function (obj) {
+            if (obj.isMesh) {
+              targets.push(obj);
+              meshToId.set(obj, id);
+            }
+          });
+        }
+        if (!targets.length) return;
+        var hits = ray.intersectObjects(targets, false);
+        if (hits.length > 0) {
+          var hitId = meshToId.get(hits[0].object);
+          if (hitId) openPanel(hitId);
+        }
+      }
+
+      canvas.addEventListener('touchstart', function (ev) {
+        if (ev.touches && ev.touches.length === 1) {
+          tapStart = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, t: Date.now() };
+        } else {
+          tapStart = null;
+        }
+      }, { passive: true });
+
+      canvas.addEventListener('touchend', function (ev) {
+        if (!tapStart || !ev.changedTouches || !ev.changedTouches.length) return;
+        var touch = ev.changedTouches[0];
+        var dx = touch.clientX - tapStart.x;
+        var dy = touch.clientY - tapStart.y;
+        var dt = Date.now() - tapStart.t;
+        tapStart = null;
+        if (Math.hypot(dx, dy) < 18 && dt < 500) {
+          handleTapAt(touch.clientX, touch.clientY);
+        }
+      }, { passive: true });
+
+      canvas.addEventListener('click', function (ev) {
+        handleTapAt(ev.clientX, ev.clientY);
+      });
+    }, { once: true });
   }
 
   // ------------------------------------------------------------------
