@@ -103,8 +103,6 @@
       if (lockBtn) lockBtn.classList.add('hidden');
       if (rescanBtn) rescanBtn.classList.add('hidden');
 
-      // Si la càmera ja està enfocant el cartell en aquest moment, passem directament
-      // a 'settling' perquè torni a sortir el botó "Fixar ara" a l'instant!
       if (targetCurrentlyVisible) {
         setAnchorState('settling');
       }
@@ -115,7 +113,7 @@
       if (dot) { dot.classList.remove('locked'); dot.classList.add('warn'); }
       if (txt) txt.textContent = "Enquadra l'armari i prem Fixar ara";
       if (lockBtn) lockBtn.classList.remove('hidden');
-      if (rescanBtn) rescanBtn.classList.remove('hidden');
+      if (rescanBtn) rescanBtn.classList.add('hidden');
     } else if (next === 'locked') {
       if (comp) comp.lockCurrentPose();
       updateGuideVisual(false, true);
@@ -449,38 +447,26 @@
   }
 
   // ------------------------------------------------------------------
-  //  ORIENTACIÓ DEL DISPOSITIU (GIROSCOPI) PER MANTENIR EL 6DoF SI EL CARTELL SURT DE PLA
+  //  INCLINACIÓ RELATIVA DEL MÒBIL (SENSE BRÚIXOLA) PER QUAN T'AJUPS MOLT A PROP
   // ------------------------------------------------------------------
-  var deviceGyro = {
+  var deviceTilt = {
     active: false,
-    hasAbsolute: false,
-    alpha: 0,
     beta: 0,
     gamma: 0,
     listening: false
   };
 
   function startDeviceGyroListener() {
-    if (deviceGyro.listening) return;
-    deviceGyro.listening = true;
+    if (deviceTilt.listening) return;
+    deviceTilt.listening = true;
 
-    window.addEventListener('deviceorientationabsolute', function (ev) {
-      if (ev && typeof ev.alpha === 'number' && typeof ev.beta === 'number' && typeof ev.gamma === 'number') {
-        deviceGyro.alpha = ev.alpha;
-        deviceGyro.beta = ev.beta;
-        deviceGyro.gamma = ev.gamma;
-        deviceGyro.hasAbsolute = true;
-        deviceGyro.active = true;
-      }
-    }, true);
-
+    // Usem NOMÉS 'deviceorientation' (inclinació beta/gamma de l'acceleròmetre+giroscopi)
+    // i ignorem la brúixola (alpha), que és el que provoca deriva interior davant d'un armari metàl·lic.
     window.addEventListener('deviceorientation', function (ev) {
-      if (deviceGyro.hasAbsolute) return;
-      if (ev && typeof ev.alpha === 'number' && typeof ev.beta === 'number' && typeof ev.gamma === 'number') {
-        deviceGyro.alpha = ev.alpha;
-        deviceGyro.beta = ev.beta;
-        deviceGyro.gamma = ev.gamma;
-        deviceGyro.active = true;
+      if (ev && typeof ev.beta === 'number' && typeof ev.gamma === 'number') {
+        deviceTilt.beta = ev.beta;
+        deviceTilt.gamma = ev.gamma;
+        deviceTilt.active = true;
       }
     }, true);
   }
@@ -497,35 +483,21 @@
     } catch (e) {}
   }
 
-  var getDeviceCameraQuaternion = (function () {
-    var zee = null, euler = null, q0 = null, q1 = null;
+  var getTiltQuaternion = (function () {
+    var euler = null;
     return function (outQuat) {
       var THREE = AFRAME.THREE;
-      if (!zee) {
-        zee = new THREE.Vector3(0, 0, 1);
-        euler = new THREE.Euler();
-        q0 = new THREE.Quaternion();
-        q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
-      }
-      var alpha = THREE.MathUtils.degToRad(deviceGyro.alpha || 0);
-      var beta  = THREE.MathUtils.degToRad(deviceGyro.beta  || 0);
-      var gamma = THREE.MathUtils.degToRad(deviceGyro.gamma || 0);
-      var orient = 0;
-      if (window.screen && window.screen.orientation && typeof window.screen.orientation.angle === 'number') {
-        orient = THREE.MathUtils.degToRad(window.screen.orientation.angle);
-      } else if (typeof window.orientation === 'number') {
-        orient = THREE.MathUtils.degToRad(window.orientation);
-      }
-      euler.set(beta, alpha, -gamma, 'YXZ');
+      if (!euler) euler = new THREE.Euler();
+      var beta  = THREE.MathUtils.degToRad(deviceTilt.beta  || 0);
+      var gamma = THREE.MathUtils.degToRad(deviceTilt.gamma || 0);
+      euler.set(beta, 0, -gamma, 'YXZ');
       outQuat.setFromEuler(euler);
-      outQuat.multiply(q1);
-      outQuat.multiply(q0.setFromAxisAngle(zee, -orient));
       return outQuat;
     };
   })();
 
   // ------------------------------------------------------------------
-  //  COMPONENT D'ANCORATGE 6DoF REAL + FIXACIÓ ESTABLE AL MÓN FÍSIC
+  //  COMPONENT 6DoF ESTABILITZAT AMB ZONA MORTA (0 TREMOLOR + DETECTA AJUPIR-SE)
   // ------------------------------------------------------------------
   function registerStickyTargetComponent() {
     if (!window.AFRAME || AFRAME.components['sticky-target']) return;
@@ -536,9 +508,9 @@
     var normalVec = new THREE.Vector3();
     var toCamVec = new THREE.Vector3();
     var cornerVec = new THREE.Vector3();
-    var devQuatRaw = new THREE.Quaternion();
-    var devQuatInv = new THREE.Quaternion();
-    var deltaQuat = new THREE.Quaternion();
+    var tiltNow = new THREE.Quaternion();
+    var tiltInv = new THREE.Quaternion();
+    var deltaTilt = new THREE.Quaternion();
 
     var c = CFG.cabinet;
     var x0 = -CFG.sheet.fromLeftCm * U;
@@ -606,81 +578,110 @@
     AFRAME.registerComponent('sticky-target', {
       init: function () {
         this.hasPose = false;
-        this.smoothPos = new THREE.Vector3();
-        this.smoothQuat = new THREE.Quaternion();
-        this.smoothScale = new THREE.Vector3(1, 1, 1);
+        // Pose estabilitzada actual (amb zona morta perquè no tremoli mai si estàs quiet)
+        this.stablePos = new THREE.Vector3();
+        this.stableQuat = new THREE.Quaternion();
+        this.stableScale = new THREE.Vector3(1, 1, 1);
 
-        // Pose congelada en l'instant exacte en què l'usuari prem "Fixar ara"
-        this.lockedPos = new THREE.Vector3();
-        this.lockedQuat = new THREE.Quaternion();
-        this.lockedScale = new THREE.Vector3(1, 1, 1);
-        this.lockGyroQuat = new THREE.Quaternion();
-        this.smoothGyroQuat = new THREE.Quaternion();
-        this.hasLockGyro = false;
+        // Referència d'inclinació per si t'ajups molt a prop i el cartell surt per dalt
+        this.refPos = new THREE.Vector3();
+        this.refQuat = new THREE.Quaternion();
+        this.refTiltQuat = new THREE.Quaternion();
+        this.hasRefTilt = false;
 
         this.lastHintMsg = '';
       },
       resetLock: function () {
         this.hasPose = false;
-        this.hasLockGyro = false;
+        this.hasRefTilt = false;
+        this.lastHintMsg = '';
       },
-      applyMatrix: function (obj, pos, quat, scale) {
-        obj.matrix.compose(pos, quat, scale);
+      applyMatrix: function (obj) {
+        obj.matrix.compose(this.stablePos, this.stableQuat, this.stableScale);
         obj.matrixWorld.copy(obj.matrix);
         obj.visible = true;
+      },
+      saveTiltAnchor: function () {
+        this.refPos.copy(this.stablePos);
+        this.refQuat.copy(this.stableQuat);
+        if (deviceTilt.active) {
+          getTiltQuaternion(this.refTiltQuat);
+          this.hasRefTilt = true;
+        } else {
+          this.hasRefTilt = false;
+        }
       },
       lockCurrentPose: function () {
         var obj = this.el.object3D;
         if (!this.hasPose && obj.visible) {
-          obj.matrix.decompose(this.smoothPos, this.smoothQuat, this.smoothScale);
+          obj.matrix.decompose(this.stablePos, this.stableQuat, this.stableScale);
           this.hasPose = true;
         }
         if (!this.hasPose) return;
-
-        // Guardem la posició i orientació EXACTES d'aquest instant (sense més vibració de càmera)
-        this.lockedPos.copy(this.smoothPos);
-        this.lockedQuat.copy(this.smoothQuat);
-        this.lockedScale.copy(this.smoothScale);
-
-        if (deviceGyro.active) {
-          getDeviceCameraQuaternion(this.lockGyroQuat);
-          this.smoothGyroQuat.copy(this.lockGyroQuat);
-          this.hasLockGyro = true;
-        } else {
-          this.hasLockGyro = false;
-        }
-
-        this.applyMatrix(obj, this.lockedPos, this.lockedQuat, this.lockedScale);
+        this.saveTiltAnchor();
+        this.applyMatrix(obj);
       },
-      computeLockedPose: function (dt) {
+      updateStabilized6DoF: function (dt, isLocked) {
         var obj = this.el.object3D;
-        if (!this.hasPose) return;
 
-        if (this.hasLockGyro && deviceGyro.active) {
-          getDeviceCameraQuaternion(devQuatRaw);
-          var gAlpha = 1 - Math.exp(-24 * dt);
-          this.smoothGyroQuat.slerp(devQuatRaw, gAlpha);
+        if (targetCurrentlyVisible && obj.visible) {
+          obj.matrix.decompose(tmpPos, tmpQuat, tmpScale);
 
-          // q_delta = q_now^{-1} * q_lock -> manté l'armari clavat al lloc físic on el vas fixar
-          // encara que facis passos enrere o moguis moltíssim la càmera!
-          devQuatInv.copy(this.smoothGyroQuat).invert();
-          deltaQuat.copy(devQuatInv).multiply(this.lockGyroQuat);
+          if (!this.hasPose) {
+            this.stablePos.copy(tmpPos);
+            this.stableQuat.copy(tmpQuat);
+            this.stableScale.copy(tmpScale);
+            this.hasPose = true;
+            this.saveTiltAnchor();
+            this.applyMatrix(obj);
+            return;
+          }
 
-          this.smoothPos.copy(this.lockedPos).applyQuaternion(deltaQuat);
-          this.smoothQuat.copy(deltaQuat).multiply(this.lockedQuat);
-        } else {
-          this.smoothPos.copy(this.lockedPos);
-          this.smoothQuat.copy(this.lockedQuat);
+          // Mesurem quant t'has mogut respecte a la posició estabilitzada:
+          // - Si estàs quiet (soroll de càmera < llindar), NO es mou absolutament res (0 tremolor).
+          // - Si t'ajups, fas un pas enrere o et mous de costat, segueix el moviment real en 6DoF!
+          var dist = this.stablePos.distanceTo(tmpPos);
+          var angRad = this.stableQuat.angleTo(tmpQuat);
+          var angDeg = THREE.MathUtils.radToDeg(angRad);
+
+          var deadPos = isLocked ? 0.045 : 0.015;   // ~9 mm fixat / ~3 mm enquadrant
+          var deadAng = isLocked ? 1.4   : 0.45;    // 1.4 graus fixat / 0.45 graus enquadrant
+
+          if (dist > deadPos || angDeg > deadAng) {
+            // Només apliquem la part que supera la zona morta perquè l'arrencada sigui sedosa
+            var posExcess = Math.max(0, dist - deadPos);
+            var angExcess = Math.max(0, angDeg - deadAng);
+            var speed = Math.min(14, 4 + posExcess * 35 + angExcess * 0.9);
+            var alpha = 1 - Math.exp(-speed * dt);
+
+            this.stablePos.lerp(tmpPos, alpha);
+            this.stableQuat.slerp(tmpQuat, alpha);
+            this.stableScale.lerp(tmpScale, alpha);
+          }
+
+          this.saveTiltAnchor();
+          this.applyMatrix(obj);
+        } else if (this.hasPose && (anchorState === 'locked' || anchorState === 'settling')) {
+          // El cartell ha sortit de pantalla (per exemple, t'has ajupit molt a prop dels llibres de baix):
+          // mantenim l'armari visible i l'inclinem suaument només si superes una zona morta d'1.5°
+          if (this.hasRefTilt && deviceTilt.active) {
+            getTiltQuaternion(tiltNow);
+            var tiltDiffDeg = THREE.MathUtils.radToDeg(this.refTiltQuat.angleTo(tiltNow));
+            if (tiltDiffDeg > 1.5) {
+              tiltInv.copy(tiltNow).invert();
+              deltaTilt.copy(tiltInv).multiply(this.refTiltQuat);
+              this.stablePos.copy(this.refPos).applyQuaternion(deltaTilt);
+              this.stableQuat.copy(deltaTilt).multiply(this.refQuat);
+            }
+          }
+          this.applyMatrix(obj);
         }
-        this.smoothScale.copy(this.lockedScale);
-        this.applyMatrix(obj, this.smoothPos, this.smoothQuat, this.smoothScale);
       },
       tick: function (time, timeDelta) {
         if (DEMO) return;
         var obj = this.el.object3D;
         var dt = Math.min((timeDelta || 16) / 1000, 0.1);
 
-        // Si estava en 'scanning' però el cartell ja és visible, passem a 'settling'
         if (anchorState === 'scanning') {
           if (targetCurrentlyVisible || obj.visible) {
             targetCurrentlyVisible = true;
@@ -690,31 +691,18 @@
           }
         }
 
-        // ESTAT FIXAT ('locked'): ignorem MindAR completament perquè no tremoli ni salti
         if (anchorState === 'locked') {
-          this.computeLockedPose(dt);
+          this.updateStabilized6DoF(dt, true);
           return;
         }
 
-        // ESTAT ENQUADRANT ('settling'): segueix el cartell en 6DoF fins que l'usuari premi "Fixar ara"
+        // ESTAT ENQUADRANT ('settling')
+        this.updateStabilized6DoF(dt, false);
+
         var txt = $('hint-text');
         var dot = $('hint-dot');
 
         if (targetCurrentlyVisible && obj.visible) {
-          obj.matrix.decompose(tmpPos, tmpQuat, tmpScale);
-          if (!this.hasPose) {
-            this.smoothPos.copy(tmpPos);
-            this.smoothQuat.copy(tmpQuat);
-            this.smoothScale.copy(tmpScale);
-            this.hasPose = true;
-          } else {
-            var alpha = 1 - Math.exp(-16 * dt);
-            this.smoothPos.lerp(tmpPos, alpha);
-            this.smoothQuat.slerp(tmpQuat, alpha);
-            this.smoothScale.lerp(tmpScale, alpha);
-          }
-          this.applyMatrix(obj, this.smoothPos, this.smoothQuat, this.smoothScale);
-
           var check = evaluateFraming(obj);
           updateGuideVisual(true, check.ok);
 
@@ -727,9 +715,6 @@
             dot.classList.add('warn');
           }
         } else {
-          if (this.hasPose) {
-            this.applyMatrix(obj, this.smoothPos, this.smoothQuat, this.smoothScale);
-          }
           if (txt && this.lastHintMsg !== "Apunta al cartell o prem Fixar ara") {
             this.lastHintMsg = "Apunta al cartell o prem Fixar ara";
             txt.textContent = this.lastHintMsg;
@@ -740,7 +725,7 @@
       tock: function () {
         if (DEMO) return;
         if (this.hasPose && (anchorState === 'locked' || anchorState === 'settling')) {
-          this.applyMatrix(this.el.object3D, this.smoothPos, this.smoothQuat, this.smoothScale);
+          this.applyMatrix(this.el.object3D);
         }
       }
     });
