@@ -6,110 +6,36 @@
   <title>Biblioteca del pati · RA</title>
   <link rel="stylesheet" href="style.css">
 
-  <!-- Millora de càmera: força la càmera principal del darrere i resolució HD abans que arrenqui MindAR -->
+  <!-- Millora suau de càmera: demana HD (720p) i enfocament continu en una sola crida segura -->
   <script>
   (function () {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
     var origGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
 
-    function scoreBackCamera(d, idx) {
-      var lbl = (d.label || '').toLowerCase();
-      var score = 0;
-      if (/back|rear|environment|trasera|darrere/.test(lbl)) score += 100;
-      if (/front|user|selfie|frontal|davant/.test(lbl)) score -= 500;
-      if (/wide|ultra|macro|tele|depth|bokeh|tof|mono|aux/.test(lbl)) score -= 80;
-      if (/main|primary|principal|1x/.test(lbl)) score += 30;
-      // En Android (camera2 0, facing back vs camera2 2, facing back), l'índex més baix sol ser la lent principal 1x
-      var m = lbl.match(/camera2?\s*(\d+)/);
-      if (m) score -= parseInt(m[1], 10) * 5;
-      score -= idx;
-      return score;
-    }
-
-    async function pickMainBackCameraId() {
-      if (!navigator.mediaDevices.enumerateDevices) return null;
-      try {
-        var devices = await navigator.mediaDevices.enumerateDevices();
-        var videoInputs = devices.filter(function (d) { return d.kind === 'videoinput'; });
-        if (!videoInputs.length) return null;
-
-        var labeledBack = videoInputs.filter(function (d) {
-          var lbl = (d.label || '').toLowerCase();
-          return lbl && /back|rear|environment|trasera|darrere/.test(lbl) && !/front|user|selfie|frontal|davant/.test(lbl);
-        });
-        if (!labeledBack.length) return null;
-
-        labeledBack.sort(function (a, b) {
-          return scoreBackCamera(b, videoInputs.indexOf(b)) - scoreBackCamera(a, videoInputs.indexOf(a));
-        });
-        return labeledBack[0].deviceId || null;
-      } catch (e) {
-        return null;
+    navigator.mediaDevices.getUserMedia = async function (constraints) {
+      if (constraints && constraints.video && typeof constraints.video === 'object') {
+        var v = Object.assign({}, constraints.video);
+        if (!v.width) v.width = { ideal: 1280 };
+        if (!v.height) v.height = { ideal: 720 };
+        constraints = Object.assign({}, constraints, { video: v });
       }
-    }
-
-    async function applyBestFocus(stream) {
+      var stream = await origGetUserMedia(constraints);
       try {
         var track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
         if (track && track.getCapabilities && track.applyConstraints) {
           var caps = track.getCapabilities();
           var adv = [];
-          if (caps.focusMode && caps.focusMode.indexOf('continuous') !== -1) adv.push({ focusMode: 'continuous' });
-          if (caps.exposureMode && caps.exposureMode.indexOf('continuous') !== -1) adv.push({ exposureMode: 'continuous' });
-          if (caps.whiteBalanceMode && caps.whiteBalanceMode.indexOf('continuous') !== -1) adv.push({ whiteBalanceMode: 'continuous' });
-          if (adv.length) await track.applyConstraints({ advanced: adv }).catch(function () {});
+          if (caps.focusMode && caps.focusMode.indexOf('continuous') !== -1) {
+            adv.push({ focusMode: 'continuous' });
+          }
+          if (caps.exposureMode && caps.exposureMode.indexOf('continuous') !== -1) {
+            adv.push({ exposureMode: 'continuous' });
+          }
+          if (adv.length) {
+            track.applyConstraints({ advanced: adv }).catch(function () {});
+          }
         }
       } catch (e) {}
-    }
-
-    navigator.mediaDevices.getUserMedia = async function (constraints) {
-      var isEnv = false;
-      var hadExplicitDevice = false;
-
-      if (constraints && constraints.video && typeof constraints.video === 'object') {
-        var v = Object.assign({}, constraints.video);
-        hadExplicitDevice = !!v.deviceId;
-        isEnv = !v.facingMode ||
-          v.facingMode === 'environment' ||
-          (typeof v.facingMode === 'object' && (v.facingMode.exact === 'environment' || v.facingMode.ideal === 'environment'));
-
-        if (isEnv) {
-          if (!v.deviceId) {
-            var mainId = await pickMainBackCameraId();
-            if (mainId) v.deviceId = { ideal: mainId };
-          }
-          if (!v.width) v.width = { ideal: 1920 };
-          if (!v.height) v.height = { ideal: 1080 };
-          if (!v.frameRate) v.frameRate = { ideal: 30 };
-        }
-        constraints = Object.assign({}, constraints, { video: v });
-      }
-
-      var stream = await origGetUserMedia(constraints);
-
-      // Si era el primer permís (etiquetes buides abans d'acceptar), ara ja podem veure quina lent és la principal
-      if (isEnv && !hadExplicitDevice) {
-        try {
-          var bestId = await pickMainBackCameraId();
-          var curTrack = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
-          var curSettings = curTrack && curTrack.getSettings ? curTrack.getSettings() : {};
-          if (bestId && curSettings.deviceId && curSettings.deviceId !== bestId) {
-            var upgraded = await origGetUserMedia({
-              audio: false,
-              video: {
-                deviceId: { exact: bestId },
-                width: { ideal: 1920 },
-                height: { ideal: 1080 },
-                frameRate: { ideal: 30 }
-              }
-            });
-            stream.getTracks().forEach(function (t) { t.stop(); });
-            stream = upgraded;
-          }
-        } catch (e) {}
-      }
-
-      await applyBestFocus(stream);
       return stream;
     };
   })();
