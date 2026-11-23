@@ -447,33 +447,61 @@
   }
 
   // ------------------------------------------------------------------
-  //  INCLINACIÓ RELATIVA DEL MÒBIL (SENSE BRÚIXOLA) PER QUAN T'AJUPS MOLT A PROP
+  //  GRAVETAT / INCLINACIÓ VERTICAL SENSE SINGULARITATS (ZERO GIMBAL LOCK)
   // ------------------------------------------------------------------
-  var deviceTilt = {
+  var devicePitch = {
     active: false,
-    beta: 0,
-    gamma: 0,
+    rad: 0,
+    smoothRad: 0,
     listening: false
   };
 
   function startDeviceGyroListener() {
-    if (deviceTilt.listening) return;
-    deviceTilt.listening = true;
+    if (devicePitch.listening) return;
+    devicePitch.listening = true;
 
-    // Usem NOMÉS 'deviceorientation' (inclinació beta/gamma de l'acceleròmetre+giroscopi)
-    // i ignorem la brúixola (alpha), que és el que provoca deriva interior davant d'un armari metàl·lic.
-    window.addEventListener('deviceorientation', function (ev) {
-      if (ev && typeof ev.beta === 'number' && typeof ev.gamma === 'number') {
-        deviceTilt.beta = ev.beta;
-        deviceTilt.gamma = ev.gamma;
-        deviceTilt.active = true;
+    // 1. Preferim l'acceleròmetre de gravetat (devicemotion):
+    //    atan2(-gz, -gy) dona l'angle exacte d'inclinació cap a terra sense cap bloqueig a 90° ni brúixola!
+    window.addEventListener('devicemotion', function (ev) {
+      var g = ev && ev.accelerationIncludingGravity;
+      if (!g || typeof g.y !== 'number' || typeof g.z !== 'number') return;
+      var mag = Math.hypot(g.x || 0, g.y, g.z);
+      if (mag < 3) return;
+      // Quan el mòbil està dret en vertical: gy ≈ -9.8, gz ≈ 0 -> pitch = 0 rad
+      // Quan inclines el mòbil cap avall (mirant prestatges de baix): gz < 0 -> pitch > 0
+      var p = Math.atan2(-g.z, -g.y);
+      p = Math.max(-1.35, Math.min(1.35, p));
+      if (!devicePitch.active) {
+        devicePitch.rad = p;
+        devicePitch.smoothRad = p;
+        devicePitch.active = true;
+      } else {
+        devicePitch.rad = p;
       }
+    }, true);
+
+    // 2. Fallback suau si devicemotion no està disponible (sense YXZ gimbal lock)
+    window.addEventListener('deviceorientation', function (ev) {
+      if (devicePitch.active) return;
+      if (!ev || typeof ev.beta !== 'number') return;
+      // beta = 90° en vertical -> (90 - beta) en radians
+      var p = ((90 - ev.beta) * Math.PI) / 180;
+      p = Math.max(-1.35, Math.min(1.35, p));
+      devicePitch.rad = p;
+      devicePitch.smoothRad = p;
+      devicePitch.active = true;
     }, true);
   }
 
   function requestGyroPermissionIfNeeded() {
     startDeviceGyroListener();
     try {
+      if (typeof DeviceMotionEvent !== 'undefined' &&
+          typeof DeviceMotionEvent.requestPermission === 'function') {
+        DeviceMotionEvent.requestPermission().then(function (state) {
+          if (state === 'granted') startDeviceGyroListener();
+        }).catch(function () {});
+      }
       if (typeof DeviceOrientationEvent !== 'undefined' &&
           typeof DeviceOrientationEvent.requestPermission === 'function') {
         DeviceOrientationEvent.requestPermission().then(function (state) {
@@ -483,21 +511,8 @@
     } catch (e) {}
   }
 
-  var getTiltQuaternion = (function () {
-    var euler = null;
-    return function (outQuat) {
-      var THREE = AFRAME.THREE;
-      if (!euler) euler = new THREE.Euler();
-      var beta  = THREE.MathUtils.degToRad(deviceTilt.beta  || 0);
-      var gamma = THREE.MathUtils.degToRad(deviceTilt.gamma || 0);
-      euler.set(beta, 0, -gamma, 'YXZ');
-      outQuat.setFromEuler(euler);
-      return outQuat;
-    };
-  })();
-
   // ------------------------------------------------------------------
-  //  COMPONENT 6DoF ESTABILITZAT AMB ZONA MORTA (0 TREMOLOR + DETECTA AJUPIR-SE)
+  //  COMPONENT 6DoF VERTICAL BLINDAT (SENSE TORSIONS NI FLIPS DE PERSPECTIVA)
   // ------------------------------------------------------------------
   function registerStickyTargetComponent() {
     if (!window.AFRAME || AFRAME.components['sticky-target']) return;
@@ -505,12 +520,14 @@
     var tmpPos = new THREE.Vector3();
     var tmpQuat = new THREE.Quaternion();
     var tmpScale = new THREE.Vector3();
+    var fwdVec = new THREE.Vector3();
+    var xAxis = new THREE.Vector3(1, 0, 0);
+    var yAxis = new THREE.Vector3(0, 1, 0);
+    var pitchQuat = new THREE.Quaternion();
+    var yawQuat = new THREE.Quaternion();
     var normalVec = new THREE.Vector3();
     var toCamVec = new THREE.Vector3();
     var cornerVec = new THREE.Vector3();
-    var tiltNow = new THREE.Quaternion();
-    var tiltInv = new THREE.Quaternion();
-    var deltaTilt = new THREE.Quaternion();
 
     var c = CFG.cabinet;
     var x0 = -CFG.sheet.fromLeftCm * U;
@@ -529,6 +546,28 @@
       new THREE.Vector3(x0, y1, z1),
       new THREE.Vector3(x1, y1, z1)
     ];
+
+    // Reconstrueix una orientació 100% VERTICAL i RECTILÍNIA:
+    // Elimina el "roll" lateral i els salts de perspectiva de MindAR que fan que l'armari "es posi raro"
+    function buildUprightQuaternion(rawQuat, outQuat, fallbackYaw) {
+      fwdVec.set(0, 0, 1).applyQuaternion(rawQuat);
+      var horizLen = Math.hypot(fwdVec.x, fwdVec.z);
+      var yaw = fallbackYaw || 0;
+      // Si el vector frontal té prou component horitzontal, extraiem només el gir horitzontal (Yaw)
+      if (horizLen > 0.25) {
+        var rawYaw = Math.atan2(fwdVec.x, fwdVec.z);
+        // Limitem el gir horitzontal a ±38° per evitar els flips de 180° típics de marcadors plans
+        var maxYaw = THREE.MathUtils.degToRad(38);
+        if (Math.abs(rawYaw) <= THREE.MathUtils.degToRad(75)) {
+          yaw = Math.max(-maxYaw, Math.min(maxYaw, rawYaw));
+        }
+      }
+      var pitch = devicePitch.active ? devicePitch.smoothRad : 0;
+      pitchQuat.setFromAxisAngle(xAxis, pitch);
+      yawQuat.setFromAxisAngle(yAxis, yaw);
+      outQuat.copy(pitchQuat).multiply(yawQuat);
+      return yaw;
+    }
 
     function evaluateFraming(rootObj) {
       var camEl = document.querySelector('a-camera');
@@ -578,101 +617,110 @@
     AFRAME.registerComponent('sticky-target', {
       init: function () {
         this.hasPose = false;
-        // Pose estabilitzada actual (amb zona morta perquè no tremoli mai si estàs quiet)
-        this.stablePos = new THREE.Vector3();
-        this.stableQuat = new THREE.Quaternion();
-        this.stableScale = new THREE.Vector3(1, 1, 1);
+        this.smoothPos = new THREE.Vector3();
+        this.smoothQuat = new THREE.Quaternion();
+        this.smoothScale = new THREE.Vector3(1, 1, 1);
+        this.smoothYaw = 0;
 
-        // Referència d'inclinació per si t'ajups molt a prop i el cartell surt per dalt
-        this.refPos = new THREE.Vector3();
-        this.refQuat = new THREE.Quaternion();
-        this.refTiltQuat = new THREE.Quaternion();
-        this.hasRefTilt = false;
+        // Referència per quan el cartell surt de pantalla (ex. t'ajups molt a prop dels llibres de baix)
+        this.lostRefPos = new THREE.Vector3();
+        this.lostRefYaw = 0;
+        this.lostRefPitch = 0;
+        this.hasLostRef = false;
 
         this.lastHintMsg = '';
       },
       resetLock: function () {
         this.hasPose = false;
-        this.hasRefTilt = false;
+        this.hasLostRef = false;
+        this.smoothYaw = 0;
         this.lastHintMsg = '';
       },
       applyMatrix: function (obj) {
-        obj.matrix.compose(this.stablePos, this.stableQuat, this.stableScale);
+        obj.matrix.compose(this.smoothPos, this.smoothQuat, this.smoothScale);
         obj.matrixWorld.copy(obj.matrix);
         obj.visible = true;
       },
-      saveTiltAnchor: function () {
-        this.refPos.copy(this.stablePos);
-        this.refQuat.copy(this.stableQuat);
-        if (deviceTilt.active) {
-          getTiltQuaternion(this.refTiltQuat);
-          this.hasRefTilt = true;
-        } else {
-          this.hasRefTilt = false;
-        }
+      saveLostReference: function () {
+        this.lostRefPos.copy(this.smoothPos);
+        this.lostRefYaw = this.smoothYaw;
+        this.lostRefPitch = devicePitch.active ? devicePitch.smoothRad : 0;
+        this.hasLostRef = true;
       },
       lockCurrentPose: function () {
         var obj = this.el.object3D;
         if (!this.hasPose && obj.visible) {
-          obj.matrix.decompose(this.stablePos, this.stableQuat, this.stableScale);
+          obj.matrix.decompose(this.smoothPos, tmpQuat, this.smoothScale);
+          this.smoothYaw = buildUprightQuaternion(tmpQuat, this.smoothQuat, 0);
           this.hasPose = true;
         }
         if (!this.hasPose) return;
-        this.saveTiltAnchor();
+        this.saveLostReference();
         this.applyMatrix(obj);
       },
-      updateStabilized6DoF: function (dt, isLocked) {
+      updateUpright6DoF: function (dt, isLocked) {
         var obj = this.el.object3D;
+
+        if (devicePitch.active) {
+          var pAlpha = 1 - Math.exp(-14 * dt);
+          devicePitch.smoothRad += (devicePitch.rad - devicePitch.smoothRad) * pAlpha;
+        }
 
         if (targetCurrentlyVisible && obj.visible) {
           obj.matrix.decompose(tmpPos, tmpQuat, tmpScale);
+          var targetYaw = buildUprightQuaternion(tmpQuat, tmpQuat, this.smoothYaw);
 
           if (!this.hasPose) {
-            this.stablePos.copy(tmpPos);
-            this.stableQuat.copy(tmpQuat);
-            this.stableScale.copy(tmpScale);
+            this.smoothPos.copy(tmpPos);
+            this.smoothYaw = targetYaw;
+            this.smoothQuat.copy(tmpQuat);
+            this.smoothScale.copy(tmpScale);
             this.hasPose = true;
-            this.saveTiltAnchor();
+            this.saveLostReference();
             this.applyMatrix(obj);
             return;
           }
 
-          // Mesurem quant t'has mogut respecte a la posició estabilitzada:
-          // - Si estàs quiet (soroll de càmera < llindar), NO es mou absolutament res (0 tremolor).
-          // - Si t'ajups, fas un pas enrere o et mous de costat, segueix el moviment real en 6DoF!
-          var dist = this.stablePos.distanceTo(tmpPos);
-          var angRad = this.stableQuat.angleTo(tmpQuat);
-          var angDeg = THREE.MathUtils.radToDeg(angRad);
+          // Zona morta perquè no tremoli si estàs quiet, i seguiment 6DoF net (X, Y, Z + Yaw vertical)
+          // quan t'ajups, fas un pas enrere o et mous de costat:
+          var dist = this.smoothPos.distanceTo(tmpPos);
+          var yawDiffDeg = THREE.MathUtils.radToDeg(Math.abs(targetYaw - this.smoothYaw));
 
-          var deadPos = isLocked ? 0.045 : 0.015;   // ~9 mm fixat / ~3 mm enquadrant
-          var deadAng = isLocked ? 1.4   : 0.45;    // 1.4 graus fixat / 0.45 graus enquadrant
+          var deadPos = isLocked ? 0.035 : 0.015;
+          var deadYaw = isLocked ? 1.8   : 0.6;
 
-          if (dist > deadPos || angDeg > deadAng) {
-            // Només apliquem la part que supera la zona morta perquè l'arrencada sigui sedosa
-            var posExcess = Math.max(0, dist - deadPos);
-            var angExcess = Math.max(0, angDeg - deadAng);
-            var speed = Math.min(14, 4 + posExcess * 35 + angExcess * 0.9);
-            var alpha = 1 - Math.exp(-speed * dt);
-
-            this.stablePos.lerp(tmpPos, alpha);
-            this.stableQuat.slerp(tmpQuat, alpha);
-            this.stableScale.lerp(tmpScale, alpha);
+          if (dist > deadPos) {
+            var posSpeed = Math.min(14, 5 + (dist - deadPos) * 35);
+            var posAlpha = 1 - Math.exp(-posSpeed * dt);
+            this.smoothPos.lerp(tmpPos, posAlpha);
+            this.smoothScale.lerp(tmpScale, posAlpha);
           }
 
-          this.saveTiltAnchor();
+          if (yawDiffDeg > deadYaw) {
+            var yawAlpha = 1 - Math.exp(-6 * dt);
+            this.smoothYaw += (targetYaw - this.smoothYaw) * yawAlpha;
+          }
+
+          // Reconstruïm sempre la rotació 100% vertical amb la inclinació real de gravetat
+          var curPitch = devicePitch.active ? devicePitch.smoothRad : 0;
+          pitchQuat.setFromAxisAngle(xAxis, curPitch);
+          yawQuat.setFromAxisAngle(yAxis, this.smoothYaw);
+          this.smoothQuat.copy(pitchQuat).multiply(yawQuat);
+
+          this.saveLostReference();
           this.applyMatrix(obj);
         } else if (this.hasPose && (anchorState === 'locked' || anchorState === 'settling')) {
-          // El cartell ha sortit de pantalla (per exemple, t'has ajupit molt a prop dels llibres de baix):
-          // mantenim l'armari visible i l'inclinem suaument només si superes una zona morta d'1.5°
-          if (this.hasRefTilt && deviceTilt.active) {
-            getTiltQuaternion(tiltNow);
-            var tiltDiffDeg = THREE.MathUtils.radToDeg(this.refTiltQuat.angleTo(tiltNow));
-            if (tiltDiffDeg > 1.5) {
-              tiltInv.copy(tiltNow).invert();
-              deltaTilt.copy(tiltInv).multiply(this.refTiltQuat);
-              this.stablePos.copy(this.refPos).applyQuaternion(deltaTilt);
-              this.stableQuat.copy(deltaTilt).multiply(this.refQuat);
-            }
+          // Si t'ajups molt a prop dels llibres de baix i el cartell surt per dalt de la pantalla:
+          // l'armari es queda totalment recte i puja suaument a pantalla al ritme que inclines el mòbil cap avall!
+          if (this.hasLostRef && devicePitch.active) {
+            var dPitch = devicePitch.smoothRad - this.lostRefPitch;
+            pitchQuat.setFromAxisAngle(xAxis, dPitch);
+            this.smoothPos.copy(this.lostRefPos).applyQuaternion(pitchQuat);
+
+            var curPitch2 = devicePitch.smoothRad;
+            pitchQuat.setFromAxisAngle(xAxis, curPitch2);
+            yawQuat.setFromAxisAngle(yAxis, this.lostRefYaw);
+            this.smoothQuat.copy(pitchQuat).multiply(yawQuat);
           }
           this.applyMatrix(obj);
         }
@@ -692,12 +740,11 @@
         }
 
         if (anchorState === 'locked') {
-          this.updateStabilized6DoF(dt, true);
+          this.updateUpright6DoF(dt, true);
           return;
         }
 
-        // ESTAT ENQUADRANT ('settling')
-        this.updateStabilized6DoF(dt, false);
+        this.updateUpright6DoF(dt, false);
 
         var txt = $('hint-text');
         var dot = $('hint-dot');
