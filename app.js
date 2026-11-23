@@ -28,6 +28,7 @@
   var anchorState = DEMO ? 'locked' : 'scanning';
   var targetCurrentlyVisible = false;
   var goodFrameStreakMs = 0;
+  var everWasReady = false;
   var frameGuideMesh = null;
   var frameGuideMat = null;
 
@@ -92,6 +93,7 @@
 
     if (next === 'scanning') {
       goodFrameStreakMs = 0;
+      everWasReady = false;
       closePanel();
       closeDoors();
       if (holderEl && holderEl.object3D) holderEl.object3D.visible = false;
@@ -102,6 +104,7 @@
       if (rescanBtn) rescanBtn.classList.add('hidden');
     } else if (next === 'settling') {
       goodFrameStreakMs = 0;
+      everWasReady = false;
       if (dot) { dot.classList.remove('locked'); dot.classList.add('warn'); }
       if (txt) txt.textContent = "Enquadra l'armari sencer...";
       if (lockBtn) lockBtn.classList.remove('hidden');
@@ -453,7 +456,6 @@
     var toCamVec = new THREE.Vector3();
     var cornerVec = new THREE.Vector3();
 
-    // Els 8 vèrtexs de l'armari en coordenades locals del holder (unitats = amplada del paper)
     var c = CFG.cabinet;
     var x0 = -CFG.sheet.fromLeftCm * U;
     var x1 = (c.widthCm - CFG.sheet.fromLeftCm) * U;
@@ -473,10 +475,10 @@
     ];
 
     function sanitizePose(rawQuat, outQuat) {
-      // Evita angles estranys: limita la inclinació lateral (roll) i el cabeceig extrem
+      // Nivella l'armari en vertical perquè mai surti tort o inclinat en angles estranys
       euler.setFromQuaternion(rawQuat, 'YXZ');
-      var maxPitch = THREE.MathUtils.degToRad(20);
-      var maxRoll = THREE.MathUtils.degToRad(5);
+      var maxPitch = THREE.MathUtils.degToRad(12);
+      var maxRoll = THREE.MathUtils.degToRad(3);
       var maxYaw = THREE.MathUtils.degToRad(42);
       euler.x = Math.max(-maxPitch, Math.min(maxPitch, euler.x));
       euler.y = Math.max(-maxYaw, Math.min(maxYaw, euler.y));
@@ -484,21 +486,23 @@
       outQuat.setFromEuler(euler);
     }
 
+    function isValidTargetPose(pos, scale) {
+      return pos.lengthSq() > 1e-6 && scale.x > 1e-5;
+    }
+
     function evaluateFraming(holderObj, rawQuat) {
       var camEl = document.querySelector('a-camera');
       var camObj = camEl && camEl.getObject3D('camera');
       if (!camObj) return { ok: true, msg: "Estabilitzant armari..." };
 
-      // 1. Comprova que no s'estigui escanejant des d'un angle massa lateral
       normalVec.set(0, 0, 1).applyQuaternion(rawQuat).normalize();
       toCamVec.copy(holderObj.position).multiplyScalar(-1).normalize();
       var dotAngle = Math.max(-1, Math.min(1, normalVec.dot(toCamVec)));
       var angleDeg = THREE.MathUtils.radToDeg(Math.acos(dotAngle));
-      if (angleDeg > 32) {
+      if (angleDeg > 40) {
         return { ok: false, msg: "Posa't més de front al cartell" };
       }
 
-      // 2. Comprova que ELS 8 VÈRTEXS de l'armari real càpiguen sencers dins la pantalla
       holderObj.updateMatrixWorld(true);
       camObj.updateMatrixWorld(true);
       var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -513,7 +517,7 @@
         if (cornerVec.y > maxY) maxY = cornerVec.y;
       }
 
-      var margin = 0.96;
+      var margin = 1.06;
       if (behind || (maxY - minY) > margin * 2 || (maxX - minX) > margin * 2) {
         return { ok: false, msg: "Fes un pas enrere perquè surti l'armari sencer" };
       }
@@ -533,7 +537,7 @@
         return { ok: false, msg: "Fes un pas enrere per enquadrar tot l'armari" };
       }
 
-      return { ok: true, msg: "Armari sencer detectat · Mantén quiet..." };
+      return { ok: true, msg: "Armari sencer detectat · Fixant..." };
     }
 
     AFRAME.registerComponent('smooth-anchor', {
@@ -545,11 +549,13 @@
         }
       },
       snapToTarget: function () {
-        if (!rootEl || !rootEl.object3D) return;
+        if (!rootEl || !rootEl.object3D) return false;
         rootEl.object3D.updateWorldMatrix(true, false);
         rootEl.object3D.getWorldPosition(targetPos);
         rootEl.object3D.getWorldQuaternion(targetQuat);
         rootEl.object3D.getWorldScale(targetScale);
+
+        if (!isValidTargetPose(targetPos, targetScale)) return false;
 
         sanitizePose(targetQuat, clampedQuat);
         this.el.object3D.position.copy(targetPos);
@@ -557,6 +563,7 @@
         this.el.object3D.scale.copy(targetScale);
         this.el.object3D.visible = true;
         this.hasSnapped = true;
+        return true;
       },
       tick: function (time, timeDelta) {
         if (DEMO) return;
@@ -569,12 +576,11 @@
         if (anchorState === 'locked') {
           return;
         }
-        // Estat 'settling': segueix el cartell suavitzat i comprova que l'armari surti sencer
+
         var txt = $('hint-text');
         var dot = $('hint-dot');
         if (!targetCurrentlyVisible || !rootEl || !rootEl.object3D) {
-          goodFrameStreakMs = 0;
-          updateGuideVisual(this.hasSnapped, false);
+          updateGuideVisual(this.hasSnapped, everWasReady);
           if (txt && this.lastHintMsg !== "Torna a apuntar al cartell...") {
             this.lastHintMsg = "Torna a apuntar al cartell...";
             txt.textContent = this.lastHintMsg;
@@ -587,16 +593,20 @@
         rootEl.object3D.getWorldPosition(targetPos);
         rootEl.object3D.getWorldQuaternion(targetQuat);
         rootEl.object3D.getWorldScale(targetScale);
+
+        if (!isValidTargetPose(targetPos, targetScale)) return;
+
         sanitizePose(targetQuat, clampedQuat);
 
         if (!this.hasSnapped) {
           this.snapToTarget();
         } else {
           var dt = Math.min((timeDelta || 16) / 1000, 0.1);
-          var alpha = 1 - Math.exp(-6.5 * dt);
+          var alpha = 1 - Math.exp(-10 * dt);
           this.el.object3D.position.lerp(targetPos, alpha);
           this.el.object3D.quaternion.slerp(clampedQuat, alpha);
           this.el.object3D.scale.lerp(targetScale, alpha);
+          this.el.object3D.visible = true;
         }
 
         var check = evaluateFraming(this.el.object3D, targetQuat);
@@ -612,13 +622,13 @@
         }
 
         if (check.ok) {
+          everWasReady = true;
           goodFrameStreakMs += Math.min(timeDelta || 16, 100);
-          if (goodFrameStreakMs >= 1050) {
+          if (goodFrameStreakMs >= 650) {
             setAnchorState('locked');
           }
         } else {
-          // Si surt una mica del marc, baixa progressivament sense reiniciar de cop
-          goodFrameStreakMs = Math.max(0, goodFrameStreakMs - (timeDelta || 16) * 1.5);
+          goodFrameStreakMs = Math.max(0, goodFrameStreakMs - (timeDelta || 16));
         }
       }
     });
@@ -630,10 +640,11 @@
   function buildScene() {
     registerSmoothAnchorComponent();
 
+    // IMPORTANT: No sobreescrivim filterMinCF/filterBeta amb valors minúsculs perquè
+    // congelarien la posició inicial a (0,0,0) i l'armari no apareixeria.
     var arAttr = DEMO ? '' :
       'mindar-image="imageTargetSrc: ' + CFG.targetFile +
-      '; autoStart: false; uiLoading: no; uiScanning: no; uiError: no' +
-      '; filterMinCF: 0.00005; filterBeta: 0.0005; warmupTolerance: 6; missTolerance: 20;"';
+      '; autoStart: false; uiLoading: no; uiScanning: no; uiError: no; warmupTolerance: 4; missTolerance: 15;"';
     var camAttr = DEMO ? 'position="0 0 12"' : 'position="0 0 0" look-controls="enabled: false"';
     var rootAttr = DEMO ? '' : 'mindar-image-target="targetIndex: 0"';
 
@@ -663,12 +674,13 @@
       if (!canvas || !window.AFRAME) return;
 
       var tapStart = null;
+      var lastTouchEndMs = 0;
       var dragLast = null;
       var pinchStartDist = null;
       var pinchStartScale = null;
 
       function handleTapAt(clientX, clientY) {
-        if (!doorsOpen || !$('panel').classList.contains('panel-closed')) return;
+        if (!doorsOpen || currentId || !$('panel').classList.contains('panel-closed')) return;
         if (holderEl && holderEl.object3D && !holderEl.object3D.visible) return;
         var camEl = document.querySelector('a-camera');
         var camObj = camEl && camEl.getObject3D('camera');
@@ -758,11 +770,13 @@
         var dt = Date.now() - tapStart.t;
         tapStart = null;
         if (Math.hypot(dx, dy) < 18 && dt < 500) {
+          lastTouchEndMs = Date.now();
           handleTapAt(touch.clientX, touch.clientY);
         }
       }, { passive: true });
 
       canvas.addEventListener('click', function (ev) {
+        if (Date.now() - lastTouchEndMs < 650) return;
         handleTapAt(ev.clientX, ev.clientY);
       });
     }, { once: true });
@@ -1029,9 +1043,11 @@
     var camObj = camEl.getObject3D('camera');
     var dist = Math.max(Math.abs(p.z), 1.5);
     var targetDist = dist * 0.62;
-    var fovDeg = (camObj && camObj.fov) ? camObj.fov : 65;
-    var fovRad = AFRAME.THREE.MathUtils.degToRad(fovDeg);
-    var visibleHeight = 2 * targetDist * Math.tan(fovRad / 2);
+    var projY = camObj && camObj.projectionMatrix && camObj.projectionMatrix.elements && camObj.projectionMatrix.elements[5];
+    var tanHalfFov = (projY && projY > 0.1)
+      ? (1 / projY)
+      : Math.tan(AFRAME.THREE.MathUtils.degToRad((camObj && camObj.fov) ? camObj.fov : 65) / 2);
+    var visibleHeight = 2 * targetDist * tanHalfFov;
     var desiredHeight = visibleHeight * 0.36;
     var targetScale = desiredHeight / VH;
     var targetY = visibleHeight * 0.14;
@@ -1145,7 +1161,7 @@
   //  FITXA
   // ------------------------------------------------------------------
   function openPanel(id) {
-    if (currentId === id && !$('panel').classList.contains('panel-closed')) return;
+    if (currentId === id) return;
     currentId = id;
     $('p-msg').textContent = '';
     renderPanel();
@@ -1365,8 +1381,9 @@
         });
         rootEl.addEventListener('targetLost', function () {
           targetCurrentlyVisible = false;
-          // Si ja estava fixat ('locked'), es queda quiet al lloc sense desaparèixer.
-          // Si encara estava enquadrant ('settling'), espera a que tornis a enfocar i càpiga sencer.
+          if (anchorState === 'settling' && everWasReady) {
+            setAnchorState('locked');
+          }
         });
       }
     } catch (err) {
