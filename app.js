@@ -102,12 +102,18 @@
       if (txt) txt.textContent = "Apunta la càmera al cartell de l'armari";
       if (lockBtn) lockBtn.classList.add('hidden');
       if (rescanBtn) rescanBtn.classList.add('hidden');
+
+      // Si la càmera ja està enfocant el cartell en aquest moment, passem directament
+      // a 'settling' perquè torni a sortir el botó "Fixar ara" a l'instant!
+      if (targetCurrentlyVisible) {
+        setAnchorState('settling');
+      }
     } else if (next === 'settling') {
       goodFrameStreakMs = 0;
       if (comp) comp.resetLock();
       updateGuideVisual(true, false);
       if (dot) { dot.classList.remove('locked'); dot.classList.add('warn'); }
-      if (txt) txt.textContent = "Enquadra l'armari sencer...";
+      if (txt) txt.textContent = "Enquadra l'armari i prem Fixar ara";
       if (lockBtn) lockBtn.classList.remove('hidden');
       if (rescanBtn) rescanBtn.classList.remove('hidden');
     } else if (next === 'locked') {
@@ -519,7 +525,7 @@
   })();
 
   // ------------------------------------------------------------------
-  //  COMPONENT D'ANCORATGE 6DoF REAL (MindAR 6DoF complet + Giroscopi)
+  //  COMPONENT D'ANCORATGE 6DoF REAL + FIXACIÓ ESTABLE AL MÓN FÍSIC
   // ------------------------------------------------------------------
   function registerStickyTargetComponent() {
     if (!window.AFRAME || AFRAME.components['sticky-target']) return;
@@ -530,8 +536,9 @@
     var normalVec = new THREE.Vector3();
     var toCamVec = new THREE.Vector3();
     var cornerVec = new THREE.Vector3();
-    var devQuatNow = new THREE.Quaternion();
+    var devQuatRaw = new THREE.Quaternion();
     var devQuatInv = new THREE.Quaternion();
+    var deltaQuat = new THREE.Quaternion();
 
     var c = CFG.cabinet;
     var x0 = -CFG.sheet.fromLeftCm * U;
@@ -554,7 +561,7 @@
     function evaluateFraming(rootObj) {
       var camEl = document.querySelector('a-camera');
       var camObj = camEl && camEl.getObject3D('camera');
-      if (!camObj) return { ok: true, msg: "Estabilitzant armari..." };
+      if (!camObj) return { ok: true, msg: "Llest · Prem Fixar ara" };
 
       rootObj.matrix.decompose(tmpPos, tmpQuat, tmpScale);
 
@@ -563,7 +570,7 @@
       var dotAngle = Math.max(-1, Math.min(1, normalVec.dot(toCamVec)));
       var angleDeg = THREE.MathUtils.radToDeg(Math.acos(dotAngle));
       if (angleDeg > 42) {
-        return { ok: false, msg: "Posa't més de front al cartell" };
+        return { ok: false, msg: "Posa't més de front · o prem Fixar ara" };
       }
 
       camObj.updateMatrixWorld(true);
@@ -581,25 +588,19 @@
 
       var margin = 1.08;
       if (behind || (maxY - minY) > margin * 2 || (maxX - minX) > margin * 2) {
-        return { ok: false, msg: "Fes un pas enrere perquè surti l'armari sencer" };
+        return { ok: false, msg: "Fes un pas enrere · o prem Fixar ara" };
       }
       if (minY < -margin && maxY <= margin) {
-        return { ok: false, msg: "Apunta una mica més avall (es talla la base)" };
+        return { ok: false, msg: "Apunta més avall · o prem Fixar ara" };
       }
       if (maxY > margin && minY >= -margin) {
-        return { ok: false, msg: "Apunta una mica més amunt (es talla dalt)" };
-      }
-      if (minX < -margin && maxX <= margin) {
-        return { ok: false, msg: "Mou el mòbil una mica a l'esquerra" };
-      }
-      if (maxX > margin && minX >= -margin) {
-        return { ok: false, msg: "Mou el mòbil una mica a la dreta" };
+        return { ok: false, msg: "Apunta més amunt · o prem Fixar ara" };
       }
       if (minX < -margin || maxX > margin || minY < -margin || maxY > margin) {
-        return { ok: false, msg: "Fes un pas enrere per enquadrar tot l'armari" };
+        return { ok: false, msg: "Enquadra l'armari · o prem Fixar ara" };
       }
 
-      return { ok: true, msg: "Armari sencer detectat · Fixant..." };
+      return { ok: true, msg: "Armari sencer · Prem Fixar ara" };
     }
 
     AFRAME.registerComponent('sticky-target', {
@@ -608,124 +609,138 @@
         this.smoothPos = new THREE.Vector3();
         this.smoothQuat = new THREE.Quaternion();
         this.smoothScale = new THREE.Vector3(1, 1, 1);
-        this.worldRefPos = new THREE.Vector3();
-        this.worldRefQuat = new THREE.Quaternion();
-        this.hasWorldRef = false;
+
+        // Pose congelada en l'instant exacte en què l'usuari prem "Fixar ara"
+        this.lockedPos = new THREE.Vector3();
+        this.lockedQuat = new THREE.Quaternion();
+        this.lockedScale = new THREE.Vector3(1, 1, 1);
+        this.lockGyroQuat = new THREE.Quaternion();
+        this.smoothGyroQuat = new THREE.Quaternion();
+        this.hasLockGyro = false;
+
         this.lastHintMsg = '';
       },
       resetLock: function () {
         this.hasPose = false;
-        this.hasWorldRef = false;
+        this.hasLockGyro = false;
       },
-      saveWorldReference: function () {
-        if (!this.hasPose) return;
-        if (deviceGyro.active) {
-          getDeviceCameraQuaternion(devQuatNow);
-          this.worldRefPos.copy(this.smoothPos).applyQuaternion(devQuatNow);
-          this.worldRefQuat.copy(devQuatNow).multiply(this.smoothQuat);
-        } else {
-          this.worldRefPos.copy(this.smoothPos);
-          this.worldRefQuat.copy(this.smoothQuat);
-        }
-        this.hasWorldRef = true;
-      },
-      applySmoothedMatrix: function (obj) {
-        obj.matrix.compose(this.smoothPos, this.smoothQuat, this.smoothScale);
+      applyMatrix: function (obj, pos, quat, scale) {
+        obj.matrix.compose(pos, quat, scale);
         obj.matrixWorld.copy(obj.matrix);
         obj.visible = true;
       },
       lockCurrentPose: function () {
         var obj = this.el.object3D;
-        if (obj.visible && !this.hasPose) {
+        if (!this.hasPose && obj.visible) {
           obj.matrix.decompose(this.smoothPos, this.smoothQuat, this.smoothScale);
           this.hasPose = true;
         }
-        if (this.hasPose) {
-          this.saveWorldReference();
-          this.applySmoothedMatrix(obj);
+        if (!this.hasPose) return;
+
+        // Guardem la posició i orientació EXACTES d'aquest instant (sense més vibració de càmera)
+        this.lockedPos.copy(this.smoothPos);
+        this.lockedQuat.copy(this.smoothQuat);
+        this.lockedScale.copy(this.smoothScale);
+
+        if (deviceGyro.active) {
+          getDeviceCameraQuaternion(this.lockGyroQuat);
+          this.smoothGyroQuat.copy(this.lockGyroQuat);
+          this.hasLockGyro = true;
+        } else {
+          this.hasLockGyro = false;
         }
+
+        this.applyMatrix(obj, this.lockedPos, this.lockedQuat, this.lockedScale);
       },
-      updatePose: function (dt) {
+      computeLockedPose: function (dt) {
         var obj = this.el.object3D;
+        if (!this.hasPose) return;
 
-        // 1. Tracking 6DoF complet (X, Y, Z, Pitch, Yaw, Roll) mentre el cartell és visible,
-        //    tant durant l'enquadrament com un cop fixat!
-        if (targetCurrentlyVisible && obj.visible) {
-          obj.matrix.decompose(tmpPos, tmpQuat, tmpScale);
+        if (this.hasLockGyro && deviceGyro.active) {
+          getDeviceCameraQuaternion(devQuatRaw);
+          var gAlpha = 1 - Math.exp(-24 * dt);
+          this.smoothGyroQuat.slerp(devQuatRaw, gAlpha);
 
-          if (!this.hasPose) {
-            this.smoothPos.copy(tmpPos);
-            this.smoothQuat.copy(tmpQuat);
-            this.smoothScale.copy(tmpScale);
-            this.hasPose = true;
-          } else {
-            var alpha = 1 - Math.exp(-18 * dt);
-            this.smoothPos.lerp(tmpPos, alpha);
-            this.smoothQuat.slerp(tmpQuat, alpha);
-            this.smoothScale.lerp(tmpScale, alpha);
-          }
+          // q_delta = q_now^{-1} * q_lock -> manté l'armari clavat al lloc físic on el vas fixar
+          // encara que facis passos enrere o moguis moltíssim la càmera!
+          devQuatInv.copy(this.smoothGyroQuat).invert();
+          deltaQuat.copy(devQuatInv).multiply(this.lockGyroQuat);
 
-          this.applySmoothedMatrix(obj);
-          this.saveWorldReference();
-        } else if (this.hasPose && (anchorState === 'locked' || anchorState === 'settling')) {
-          // 2. Si el cartell surt de pantalla (ex. t'apropes a un llibre o mires cap a un costat),
-          //    mantenim l'armari visible i anclat a l'espai amb el giroscopi fins que torni a entrar el cartell
-          if (this.hasWorldRef && deviceGyro.active) {
-            getDeviceCameraQuaternion(devQuatNow);
-            devQuatInv.copy(devQuatNow).invert();
-            this.smoothPos.copy(this.worldRefPos).applyQuaternion(devQuatInv);
-            this.smoothQuat.copy(devQuatInv).multiply(this.worldRefQuat);
-          }
-          this.applySmoothedMatrix(obj);
+          this.smoothPos.copy(this.lockedPos).applyQuaternion(deltaQuat);
+          this.smoothQuat.copy(deltaQuat).multiply(this.lockedQuat);
+        } else {
+          this.smoothPos.copy(this.lockedPos);
+          this.smoothQuat.copy(this.lockedQuat);
         }
+        this.smoothScale.copy(this.lockedScale);
+        this.applyMatrix(obj, this.smoothPos, this.smoothQuat, this.smoothScale);
       },
       tick: function (time, timeDelta) {
         if (DEMO) return;
         var obj = this.el.object3D;
         var dt = Math.min((timeDelta || 16) / 1000, 0.1);
 
-        this.updatePose(dt);
-
-        if (anchorState !== 'settling') return;
-
-        var txt = $('hint-text');
-        var dot = $('hint-dot');
-
-        if (!targetCurrentlyVisible) {
-          if (txt && this.lastHintMsg !== "Torna a apuntar al cartell (o prem Fixar ara)") {
-            this.lastHintMsg = "Torna a apuntar al cartell (o prem Fixar ara)";
-            txt.textContent = this.lastHintMsg;
+        // Si estava en 'scanning' però el cartell ja és visible, passem a 'settling'
+        if (anchorState === 'scanning') {
+          if (targetCurrentlyVisible || obj.visible) {
+            targetCurrentlyVisible = true;
+            setAnchorState('settling');
+          } else {
+            return;
           }
-          if (dot) { dot.classList.remove('locked'); dot.classList.add('warn'); }
+        }
+
+        // ESTAT FIXAT ('locked'): ignorem MindAR completament perquè no tremoli ni salti
+        if (anchorState === 'locked') {
+          this.computeLockedPose(dt);
           return;
         }
 
-        var check = evaluateFraming(obj);
-        updateGuideVisual(true, check.ok);
+        // ESTAT ENQUADRANT ('settling'): segueix el cartell en 6DoF fins que l'usuari premi "Fixar ara"
+        var txt = $('hint-text');
+        var dot = $('hint-dot');
 
-        if (txt && this.lastHintMsg !== check.msg) {
-          this.lastHintMsg = check.msg;
-          txt.textContent = check.msg;
-        }
-        if (dot) {
-          dot.classList.remove('locked');
-          dot.classList.add('warn');
-        }
+        if (targetCurrentlyVisible && obj.visible) {
+          obj.matrix.decompose(tmpPos, tmpQuat, tmpScale);
+          if (!this.hasPose) {
+            this.smoothPos.copy(tmpPos);
+            this.smoothQuat.copy(tmpQuat);
+            this.smoothScale.copy(tmpScale);
+            this.hasPose = true;
+          } else {
+            var alpha = 1 - Math.exp(-16 * dt);
+            this.smoothPos.lerp(tmpPos, alpha);
+            this.smoothQuat.slerp(tmpQuat, alpha);
+            this.smoothScale.lerp(tmpScale, alpha);
+          }
+          this.applyMatrix(obj, this.smoothPos, this.smoothQuat, this.smoothScale);
 
-        if (check.ok) {
-          goodFrameStreakMs += Math.min(timeDelta || 16, 100);
-          if (goodFrameStreakMs >= 700) {
-            setAnchorState('locked');
+          var check = evaluateFraming(obj);
+          updateGuideVisual(true, check.ok);
+
+          if (txt && this.lastHintMsg !== check.msg) {
+            this.lastHintMsg = check.msg;
+            txt.textContent = check.msg;
+          }
+          if (dot) {
+            dot.classList.remove('locked');
+            dot.classList.add('warn');
           }
         } else {
-          goodFrameStreakMs = Math.max(0, goodFrameStreakMs - (timeDelta || 16));
+          if (this.hasPose) {
+            this.applyMatrix(obj, this.smoothPos, this.smoothQuat, this.smoothScale);
+          }
+          if (txt && this.lastHintMsg !== "Apunta al cartell o prem Fixar ara") {
+            this.lastHintMsg = "Apunta al cartell o prem Fixar ara";
+            txt.textContent = this.lastHintMsg;
+          }
+          if (dot) { dot.classList.remove('locked'); dot.classList.add('warn'); }
         }
       },
       tock: function () {
-        // Evita que MindAR amagui o sobreescrigui la matriu entre el tick i el renderitzat
         if (DEMO) return;
         if (this.hasPose && (anchorState === 'locked' || anchorState === 'settling')) {
-          this.applySmoothedMatrix(this.el.object3D);
+          this.applyMatrix(this.el.object3D, this.smoothPos, this.smoothQuat, this.smoothScale);
         }
       }
     });
@@ -1365,7 +1380,7 @@
     if ($('lock-now-btn')) {
       $('lock-now-btn').addEventListener('click', function (ev) {
         ev.stopPropagation();
-        if (anchorState === 'settling') setAnchorState('locked');
+        if (anchorState !== 'locked') setAnchorState('locked');
       });
     }
     if ($('rescan-btn')) {
