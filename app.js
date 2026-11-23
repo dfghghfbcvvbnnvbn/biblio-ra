@@ -443,8 +443,71 @@
   }
 
   // ------------------------------------------------------------------
-  //  COMPONENT D'ANCORATGE SOBRE EL MATEIX #root DE MINDAR
-  //  (garanteix que l'armari sempre surti, s'anivelli en vertical i es fixi)
+  //  ORIENTACIÓ DEL DISPOSITIU (GIROSCOPI) PER MANTENIR L'ARMARI ANCORAT AL MÓN REAL
+  // ------------------------------------------------------------------
+  var deviceGyro = {
+    active: false,
+    alpha: 0,
+    beta: 0,
+    gamma: 0,
+    listening: false
+  };
+
+  function startDeviceGyroListener() {
+    if (deviceGyro.listening) return;
+    deviceGyro.listening = true;
+    window.addEventListener('deviceorientation', function (ev) {
+      if (ev && typeof ev.alpha === 'number' && typeof ev.beta === 'number' && typeof ev.gamma === 'number') {
+        deviceGyro.alpha = ev.alpha;
+        deviceGyro.beta = ev.beta;
+        deviceGyro.gamma = ev.gamma;
+        deviceGyro.active = true;
+      }
+    }, true);
+  }
+
+  function requestGyroPermissionIfNeeded() {
+    startDeviceGyroListener();
+    try {
+      if (typeof DeviceOrientationEvent !== 'undefined' &&
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        DeviceOrientationEvent.requestPermission().then(function (state) {
+          if (state === 'granted') startDeviceGyroListener();
+        }).catch(function () {});
+      }
+    } catch (e) {}
+  }
+
+  // Converteix (alpha, beta, gamma) a quaternio de càmera Three.js (estàndard DeviceOrientationControls)
+  var getDeviceCameraQuaternion = (function () {
+    var zee = null, euler = null, q0 = null, q1 = null;
+    return function (outQuat) {
+      var THREE = AFRAME.THREE;
+      if (!zee) {
+        zee = new THREE.Vector3(0, 0, 1);
+        euler = new THREE.Euler();
+        q0 = new THREE.Quaternion();
+        q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)); // -PI/2 sobre X
+      }
+      var alpha = THREE.MathUtils.degToRad(deviceGyro.alpha || 0);
+      var beta  = THREE.MathUtils.degToRad(deviceGyro.beta  || 0);
+      var gamma = THREE.MathUtils.degToRad(deviceGyro.gamma || 0);
+      var orient = 0;
+      if (window.screen && window.screen.orientation && typeof window.screen.orientation.angle === 'number') {
+        orient = THREE.MathUtils.degToRad(window.screen.orientation.angle);
+      } else if (typeof window.orientation === 'number') {
+        orient = THREE.MathUtils.degToRad(window.orientation);
+      }
+      euler.set(beta, alpha, -gamma, 'YXZ');
+      outQuat.setFromEuler(euler);
+      outQuat.multiply(q1);
+      outQuat.multiply(q0.setFromAxisAngle(zee, -orient));
+      return outQuat;
+    };
+  })();
+
+  // ------------------------------------------------------------------
+  //  COMPONENT D'ANCORATGE REAL AL MÓN 3D (6DoF MindAR + Giroscopi)
   // ------------------------------------------------------------------
   function registerStickyTargetComponent() {
     if (!window.AFRAME || AFRAME.components['sticky-target']) return;
@@ -456,6 +519,8 @@
     var normalVec = new THREE.Vector3();
     var toCamVec = new THREE.Vector3();
     var cornerVec = new THREE.Vector3();
+    var devQuatNow = new THREE.Quaternion();
+    var devQuatInv = new THREE.Quaternion();
 
     var c = CFG.cabinet;
     var x0 = -CFG.sheet.fromLeftCm * U;
@@ -474,6 +539,14 @@
       new THREE.Vector3(x0, y1, z1),
       new THREE.Vector3(x1, y1, z1)
     ];
+
+    function levelCabinetQuaternion(rawQuat, outQuat) {
+      // Mantenim l'orientació horitzontal real (yaw) però nivellem la inclinació lateral (roll = 0)
+      euler.setFromQuaternion(rawQuat, 'YXZ');
+      euler.x = Math.max(THREE.MathUtils.degToRad(-15), Math.min(THREE.MathUtils.degToRad(15), euler.x));
+      euler.z = 0;
+      outQuat.setFromEuler(euler);
+    }
 
     function evaluateFraming(rootObj) {
       var camEl = document.querySelector('a-camera');
@@ -528,57 +601,93 @@
 
     AFRAME.registerComponent('sticky-target', {
       init: function () {
-        this.locked = false;
-        this.lockedMatrix = new THREE.Matrix4();
-        this.hasValidSample = false;
-        this.lastSampleMatrix = new THREE.Matrix4();
+        this.hasPose = false;
+        this.smoothPos = new THREE.Vector3();
+        this.smoothQuat = new THREE.Quaternion();
+        this.smoothScale = new THREE.Vector3(1, 1, 1);
+        // Pose de referència en l'espai del giroscopi per quan el cartell surt de pantalla
+        this.worldRefPos = new THREE.Vector3();
+        this.worldRefQuat = new THREE.Quaternion();
+        this.hasWorldRef = false;
         this.lastHintMsg = '';
       },
       resetLock: function () {
-        this.locked = false;
-        this.hasValidSample = false;
+        this.hasPose = false;
+        this.hasWorldRef = false;
+      },
+      saveWorldReference: function () {
+        if (!this.hasPose) return;
+        if (deviceGyro.active) {
+          getDeviceCameraQuaternion(devQuatNow);
+          this.worldRefPos.copy(this.smoothPos).applyQuaternion(devQuatNow);
+          this.worldRefQuat.copy(devQuatNow).multiply(this.smoothQuat);
+        } else {
+          this.worldRefPos.copy(this.smoothPos);
+          this.worldRefQuat.copy(this.smoothQuat);
+        }
+        this.hasWorldRef = true;
+      },
+      applySmoothedMatrix: function (obj) {
+        obj.matrix.compose(this.smoothPos, this.smoothQuat, this.smoothScale);
+        obj.matrixWorld.copy(obj.matrix);
+        obj.visible = true;
       },
       lockCurrentPose: function () {
         var obj = this.el.object3D;
-        var srcMat = obj.visible ? obj.matrix : (this.hasValidSample ? this.lastSampleMatrix : obj.matrix);
-        srcMat.decompose(tmpPos, tmpQuat, tmpScale);
-
-        // Anivellem la inclinació lateral (roll = 0) perquè l'armari sempre quedi recte
-        euler.setFromQuaternion(tmpQuat, 'YXZ');
-        euler.x = Math.max(THREE.MathUtils.degToRad(-12), Math.min(THREE.MathUtils.degToRad(12), euler.x));
-        euler.z = 0;
-        tmpQuat.setFromEuler(euler);
-
-        this.lockedMatrix.compose(tmpPos, tmpQuat, tmpScale);
-        obj.matrix.copy(this.lockedMatrix);
-        obj.matrixWorld.copy(this.lockedMatrix);
-        obj.visible = true;
-        this.locked = true;
+        if (obj.visible && !this.hasPose) {
+          obj.matrix.decompose(this.smoothPos, tmpQuat, this.smoothScale);
+          levelCabinetQuaternion(tmpQuat, this.smoothQuat);
+          this.hasPose = true;
+        }
+        if (this.hasPose) {
+          this.saveWorldReference();
+          this.applySmoothedMatrix(obj);
+        }
       },
       tick: function (time, timeDelta) {
         if (DEMO) return;
         var obj = this.el.object3D;
+        var dt = Math.min((timeDelta || 16) / 1000, 0.1);
 
-        if (anchorState === 'locked' && this.locked) {
-          // Mantenim l'armari completament quiet i visible encara que t'apropis o perdis el cartell
-          obj.matrix.copy(this.lockedMatrix);
-          obj.matrixWorld.copy(this.lockedMatrix);
-          obj.visible = true;
-          return;
+        // 1. Si MindAR veu el cartell en aquest frame, actualitzem la posició real 6DoF suavitzada
+        if (targetCurrentlyVisible && obj.visible) {
+          obj.matrix.decompose(tmpPos, tmpQuat, tmpScale);
+          levelCabinetQuaternion(tmpQuat, tmpQuat);
+
+          if (!this.hasPose) {
+            this.smoothPos.copy(tmpPos);
+            this.smoothQuat.copy(tmpQuat);
+            this.smoothScale.copy(tmpScale);
+            this.hasPose = true;
+          } else {
+            // Suavitzat ràpid perquè segueixi el moviment real sense vibració
+            var alpha = 1 - Math.exp(-16 * dt);
+            this.smoothPos.lerp(tmpPos, alpha);
+            this.smoothQuat.slerp(tmpQuat, alpha);
+            this.smoothScale.lerp(tmpScale, alpha);
+          }
+
+          this.applySmoothedMatrix(obj);
+          this.saveWorldReference();
+        } else if (this.hasPose && (anchorState === 'locked' || anchorState === 'settling')) {
+          // 2. El cartell ha sortit de pantalla (ex. t'apropes a un prestatge o gires el mòbil):
+          //    mantenim l'armari ancorat al món real amb el giroscopi!
+          if (this.hasWorldRef && deviceGyro.active) {
+            getDeviceCameraQuaternion(devQuatNow);
+            devQuatInv.copy(devQuatNow).invert();
+            this.smoothPos.copy(this.worldRefPos).applyQuaternion(devQuatInv);
+            this.smoothQuat.copy(devQuatInv).multiply(this.worldRefQuat);
+          }
+          this.applySmoothedMatrix(obj);
         }
 
+        // Si ja està fixat ('locked'), no cal mostrar avisos d'enquadrament
         if (anchorState !== 'settling') return;
 
         var txt = $('hint-text');
         var dot = $('hint-dot');
 
-        if (!obj.visible || !targetCurrentlyVisible) {
-          // Si ja teníem una mostra bona i l'usuari ha fet un pas enrere o s'ha mogut, el mantenim visible
-          if (this.hasValidSample) {
-            obj.matrix.copy(this.lastSampleMatrix);
-            obj.matrixWorld.copy(this.lastSampleMatrix);
-            obj.visible = true;
-          }
+        if (!targetCurrentlyVisible) {
           if (txt && this.lastHintMsg !== "Torna a apuntar al cartell (o prem Fixar ara)") {
             this.lastHintMsg = "Torna a apuntar al cartell (o prem Fixar ara)";
             txt.textContent = this.lastHintMsg;
@@ -586,10 +695,6 @@
           if (dot) { dot.classList.remove('locked'); dot.classList.add('warn'); }
           return;
         }
-
-        // Guardem l'última matriu vàlida de MindAR
-        this.lastSampleMatrix.copy(obj.matrix);
-        this.hasValidSample = true;
 
         var check = evaluateFraming(obj);
         updateGuideVisual(true, check.ok);
@@ -605,7 +710,7 @@
 
         if (check.ok) {
           goodFrameStreakMs += Math.min(timeDelta || 16, 100);
-          if (goodFrameStreakMs >= 750) {
+          if (goodFrameStreakMs >= 700) {
             setAnchorState('locked');
           }
         } else {
@@ -1198,6 +1303,8 @@
       openDoors();
       return;
     }
+
+    requestGyroPermissionIfNeeded();
 
     if (!window.AFRAME || !sceneEl) {
       showError("No s'ha carregat el motor 3D (A-Frame). Comprova la connexió a internet o prova la vista 3D sense càmera.");
