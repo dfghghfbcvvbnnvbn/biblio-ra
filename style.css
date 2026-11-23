@@ -12,11 +12,6 @@ body.demo-mode {
   background: #14110f !important;
 }
 body > video {
-  position: fixed !important;
-  inset: 0 !important;
-  width: 100% !important;
-  height: 100% !important;
-  object-fit: cover !important;
   z-index: 0 !important;
 }
 a-scene, .a-canvas {
