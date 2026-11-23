@@ -81,7 +81,7 @@
         </div>
         <div class="step-item">
           <div class="step-num">2</div>
-          <div class="step-text"><strong>Apunta al cartell</strong> amb el dibuix i el QR enganxat a l'armari.</div>
+          <div class="step-text"><strong>Escaneja el cartell un cop</strong> i l'armari quedarà fixat en 3D.</div>
         </div>
         <div class="step-item">
           <div class="step-num">3</div>
@@ -99,10 +99,12 @@
     </div>
   </div>
 
-  <!-- Missatge mentre busca el dibuix -->
+  <!-- Missatge mentre busca o fixa el dibuix -->
   <div id="hint" class="hidden">
-    <span class="scan-pulse"></span>
-    <span>Apunta la càmera al cartell de l'armari</span>
+    <span class="scan-pulse" id="hint-dot"></span>
+    <span id="hint-text">Apunta la càmera al cartell de l'armari</span>
+    <button id="lock-now-btn" class="hint-btn hint-btn-ok hidden" type="button">Fixar ara</button>
+    <button id="rescan-btn" class="hint-btn hidden" type="button">Re-escanejar</button>
   </div>
 
   <!-- Indicador de mode (demo / sense base de dades) -->
