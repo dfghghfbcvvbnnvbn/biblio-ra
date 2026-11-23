@@ -19,16 +19,15 @@
   var doors = [];
   var currentId = null;
   var doorsOpen = false;
-  var sceneEl, rootEl, holderEl;
+  var sceneEl, rootEl;
 
-  // Estat d'ancoratge en RA:
+  // Estat d'ancoratge en RA sobre el mateix #root de MindAR:
   // 'scanning' -> buscant cartell
-  // 'settling' -> detectat, estabilitzant 1 segon sense tremolor
-  // 'locked'   -> fixat en 3D (no es mou ni desapareix en apropar-se)
+  // 'settling' -> armari visible, suavitzant i comprovant que surti sencer
+  // 'locked'   -> matriu congelada en 3D (quiet, sense tremolor i no desapareix en apropar-se)
   var anchorState = DEMO ? 'locked' : 'scanning';
   var targetCurrentlyVisible = false;
   var goodFrameStreakMs = 0;
-  var everWasReady = false;
   var frameGuideMesh = null;
   var frameGuideMat = null;
 
@@ -91,12 +90,13 @@
 
     if (DEMO) return;
 
+    var comp = rootEl && rootEl.components && rootEl.components['sticky-target'];
+
     if (next === 'scanning') {
       goodFrameStreakMs = 0;
-      everWasReady = false;
       closePanel();
       closeDoors();
-      if (holderEl && holderEl.object3D) holderEl.object3D.visible = false;
+      if (comp) comp.resetLock();
       updateGuideVisual(false, false);
       if (dot) { dot.classList.remove('locked'); dot.classList.remove('warn'); }
       if (txt) txt.textContent = "Apunta la càmera al cartell de l'armari";
@@ -104,13 +104,14 @@
       if (rescanBtn) rescanBtn.classList.add('hidden');
     } else if (next === 'settling') {
       goodFrameStreakMs = 0;
-      everWasReady = false;
+      if (comp) comp.resetLock();
+      updateGuideVisual(true, false);
       if (dot) { dot.classList.remove('locked'); dot.classList.add('warn'); }
       if (txt) txt.textContent = "Enquadra l'armari sencer...";
       if (lockBtn) lockBtn.classList.remove('hidden');
       if (rescanBtn) rescanBtn.classList.remove('hidden');
     } else if (next === 'locked') {
-      if (holderEl && holderEl.object3D) holderEl.object3D.visible = true;
+      if (comp) comp.lockCurrentPose();
       updateGuideVisual(false, true);
       if (dot) { dot.classList.remove('warn'); dot.classList.add('locked'); }
       if (txt) txt.textContent = "Armari fixat · Toca un llibre";
@@ -442,15 +443,15 @@
   }
 
   // ------------------------------------------------------------------
-  //  COMPONENT D'ANCORATGE AMB VALIDACIÓ D'ANGLE I ENQUADRAMENT SENCER (RA)
+  //  COMPONENT D'ANCORATGE SOBRE EL MATEIX #root DE MINDAR
+  //  (garanteix que l'armari sempre surti, s'anivelli en vertical i es fixi)
   // ------------------------------------------------------------------
-  function registerSmoothAnchorComponent() {
-    if (!window.AFRAME || AFRAME.components['smooth-anchor']) return;
+  function registerStickyTargetComponent() {
+    if (!window.AFRAME || AFRAME.components['sticky-target']) return;
     var THREE = AFRAME.THREE;
-    var targetPos = new THREE.Vector3();
-    var targetQuat = new THREE.Quaternion();
-    var targetScale = new THREE.Vector3();
-    var clampedQuat = new THREE.Quaternion();
+    var tmpPos = new THREE.Vector3();
+    var tmpQuat = new THREE.Quaternion();
+    var tmpScale = new THREE.Vector3();
     var euler = new THREE.Euler(0, 0, 0, 'YXZ');
     var normalVec = new THREE.Vector3();
     var toCamVec = new THREE.Vector3();
@@ -474,41 +475,26 @@
       new THREE.Vector3(x1, y1, z1)
     ];
 
-    function sanitizePose(rawQuat, outQuat) {
-      // Nivella l'armari en vertical perquè mai surti tort o inclinat en angles estranys
-      euler.setFromQuaternion(rawQuat, 'YXZ');
-      var maxPitch = THREE.MathUtils.degToRad(12);
-      var maxRoll = THREE.MathUtils.degToRad(3);
-      var maxYaw = THREE.MathUtils.degToRad(42);
-      euler.x = Math.max(-maxPitch, Math.min(maxPitch, euler.x));
-      euler.y = Math.max(-maxYaw, Math.min(maxYaw, euler.y));
-      euler.z = Math.max(-maxRoll, Math.min(maxRoll, euler.z));
-      outQuat.setFromEuler(euler);
-    }
-
-    function isValidTargetPose(pos, scale) {
-      return pos.lengthSq() > 1e-6 && scale.x > 1e-5;
-    }
-
-    function evaluateFraming(holderObj, rawQuat) {
+    function evaluateFraming(rootObj) {
       var camEl = document.querySelector('a-camera');
       var camObj = camEl && camEl.getObject3D('camera');
       if (!camObj) return { ok: true, msg: "Estabilitzant armari..." };
 
-      normalVec.set(0, 0, 1).applyQuaternion(rawQuat).normalize();
-      toCamVec.copy(holderObj.position).multiplyScalar(-1).normalize();
+      rootObj.matrix.decompose(tmpPos, tmpQuat, tmpScale);
+
+      normalVec.set(0, 0, 1).applyQuaternion(tmpQuat).normalize();
+      toCamVec.copy(tmpPos).multiplyScalar(-1).normalize();
       var dotAngle = Math.max(-1, Math.min(1, normalVec.dot(toCamVec)));
       var angleDeg = THREE.MathUtils.radToDeg(Math.acos(dotAngle));
-      if (angleDeg > 40) {
+      if (angleDeg > 42) {
         return { ok: false, msg: "Posa't més de front al cartell" };
       }
 
-      holderObj.updateMatrixWorld(true);
       camObj.updateMatrixWorld(true);
       var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
       var behind = false;
       for (var i = 0; i < CAB_CORNERS.length; i++) {
-        cornerVec.copy(CAB_CORNERS[i]).applyMatrix4(holderObj.matrixWorld);
+        cornerVec.copy(CAB_CORNERS[i]).applyMatrix4(rootObj.matrix);
         cornerVec.project(camObj);
         if (cornerVec.z >= 1) behind = true;
         if (cornerVec.x < minX) minX = cornerVec.x;
@@ -517,7 +503,7 @@
         if (cornerVec.y > maxY) maxY = cornerVec.y;
       }
 
-      var margin = 1.06;
+      var margin = 1.08;
       if (behind || (maxY - minY) > margin * 2 || (maxX - minX) > margin * 2) {
         return { ok: false, msg: "Fes un pas enrere perquè surti l'armari sencer" };
       }
@@ -540,76 +526,72 @@
       return { ok: true, msg: "Armari sencer detectat · Fixant..." };
     }
 
-    AFRAME.registerComponent('smooth-anchor', {
+    AFRAME.registerComponent('sticky-target', {
       init: function () {
-        this.hasSnapped = false;
+        this.locked = false;
+        this.lockedMatrix = new THREE.Matrix4();
+        this.hasValidSample = false;
+        this.lastSampleMatrix = new THREE.Matrix4();
         this.lastHintMsg = '';
-        if (!DEMO) {
-          this.el.object3D.visible = false;
-        }
       },
-      snapToTarget: function () {
-        if (!rootEl || !rootEl.object3D) return false;
-        rootEl.object3D.updateWorldMatrix(true, false);
-        rootEl.object3D.getWorldPosition(targetPos);
-        rootEl.object3D.getWorldQuaternion(targetQuat);
-        rootEl.object3D.getWorldScale(targetScale);
+      resetLock: function () {
+        this.locked = false;
+        this.hasValidSample = false;
+      },
+      lockCurrentPose: function () {
+        var obj = this.el.object3D;
+        var srcMat = obj.visible ? obj.matrix : (this.hasValidSample ? this.lastSampleMatrix : obj.matrix);
+        srcMat.decompose(tmpPos, tmpQuat, tmpScale);
 
-        if (!isValidTargetPose(targetPos, targetScale)) return false;
+        // Anivellem la inclinació lateral (roll = 0) perquè l'armari sempre quedi recte
+        euler.setFromQuaternion(tmpQuat, 'YXZ');
+        euler.x = Math.max(THREE.MathUtils.degToRad(-12), Math.min(THREE.MathUtils.degToRad(12), euler.x));
+        euler.z = 0;
+        tmpQuat.setFromEuler(euler);
 
-        sanitizePose(targetQuat, clampedQuat);
-        this.el.object3D.position.copy(targetPos);
-        this.el.object3D.quaternion.copy(clampedQuat);
-        this.el.object3D.scale.copy(targetScale);
-        this.el.object3D.visible = true;
-        this.hasSnapped = true;
-        return true;
+        this.lockedMatrix.compose(tmpPos, tmpQuat, tmpScale);
+        obj.matrix.copy(this.lockedMatrix);
+        obj.matrixWorld.copy(this.lockedMatrix);
+        obj.visible = true;
+        this.locked = true;
       },
       tick: function (time, timeDelta) {
         if (DEMO) return;
-        if (anchorState === 'scanning') {
-          this.hasSnapped = false;
-          this.el.object3D.visible = false;
-          updateGuideVisual(false, false);
-          return;
-        }
-        if (anchorState === 'locked') {
+        var obj = this.el.object3D;
+
+        if (anchorState === 'locked' && this.locked) {
+          // Mantenim l'armari completament quiet i visible encara que t'apropis o perdis el cartell
+          obj.matrix.copy(this.lockedMatrix);
+          obj.matrixWorld.copy(this.lockedMatrix);
+          obj.visible = true;
           return;
         }
 
+        if (anchorState !== 'settling') return;
+
         var txt = $('hint-text');
         var dot = $('hint-dot');
-        if (!targetCurrentlyVisible || !rootEl || !rootEl.object3D) {
-          updateGuideVisual(this.hasSnapped, everWasReady);
-          if (txt && this.lastHintMsg !== "Torna a apuntar al cartell...") {
-            this.lastHintMsg = "Torna a apuntar al cartell...";
+
+        if (!obj.visible || !targetCurrentlyVisible) {
+          // Si ja teníem una mostra bona i l'usuari ha fet un pas enrere o s'ha mogut, el mantenim visible
+          if (this.hasValidSample) {
+            obj.matrix.copy(this.lastSampleMatrix);
+            obj.matrixWorld.copy(this.lastSampleMatrix);
+            obj.visible = true;
+          }
+          if (txt && this.lastHintMsg !== "Torna a apuntar al cartell (o prem Fixar ara)") {
+            this.lastHintMsg = "Torna a apuntar al cartell (o prem Fixar ara)";
             txt.textContent = this.lastHintMsg;
           }
           if (dot) { dot.classList.remove('locked'); dot.classList.add('warn'); }
           return;
         }
 
-        rootEl.object3D.updateWorldMatrix(true, false);
-        rootEl.object3D.getWorldPosition(targetPos);
-        rootEl.object3D.getWorldQuaternion(targetQuat);
-        rootEl.object3D.getWorldScale(targetScale);
+        // Guardem l'última matriu vàlida de MindAR
+        this.lastSampleMatrix.copy(obj.matrix);
+        this.hasValidSample = true;
 
-        if (!isValidTargetPose(targetPos, targetScale)) return;
-
-        sanitizePose(targetQuat, clampedQuat);
-
-        if (!this.hasSnapped) {
-          this.snapToTarget();
-        } else {
-          var dt = Math.min((timeDelta || 16) / 1000, 0.1);
-          var alpha = 1 - Math.exp(-10 * dt);
-          this.el.object3D.position.lerp(targetPos, alpha);
-          this.el.object3D.quaternion.slerp(clampedQuat, alpha);
-          this.el.object3D.scale.lerp(targetScale, alpha);
-          this.el.object3D.visible = true;
-        }
-
-        var check = evaluateFraming(this.el.object3D, targetQuat);
+        var check = evaluateFraming(obj);
         updateGuideVisual(true, check.ok);
 
         if (txt && this.lastHintMsg !== check.msg) {
@@ -622,9 +604,8 @@
         }
 
         if (check.ok) {
-          everWasReady = true;
           goodFrameStreakMs += Math.min(timeDelta || 16, 100);
-          if (goodFrameStreakMs >= 650) {
+          if (goodFrameStreakMs >= 750) {
             setAnchorState('locked');
           }
         } else {
@@ -638,15 +619,13 @@
   //  ESCENA
   // ------------------------------------------------------------------
   function buildScene() {
-    registerSmoothAnchorComponent();
+    registerStickyTargetComponent();
 
-    // IMPORTANT: No sobreescrivim filterMinCF/filterBeta amb valors minúsculs perquè
-    // congelarien la posició inicial a (0,0,0) i l'armari no apareixeria.
     var arAttr = DEMO ? '' :
       'mindar-image="imageTargetSrc: ' + CFG.targetFile +
       '; autoStart: false; uiLoading: no; uiScanning: no; uiError: no; warmupTolerance: 4; missTolerance: 15;"';
     var camAttr = DEMO ? 'position="0 0 12"' : 'position="0 0 0" look-controls="enabled: false"';
-    var rootAttr = DEMO ? '' : 'mindar-image-target="targetIndex: 0"';
+    var rootAttr = DEMO ? '' : 'mindar-image-target="targetIndex: 0" sticky-target';
 
     document.body.insertAdjacentHTML('afterbegin',
       '<a-scene id="scene" ' + arAttr + ' color-space="sRGB" renderer="colorManagement: true; alpha: true" ' +
@@ -657,12 +636,10 @@
         '<a-entity light="type: ambient; intensity: 1.15"></a-entity>' +
         '<a-entity light="type: directional; intensity: 0.95" position="1 2 3"></a-entity>' +
         '<a-entity id="root" ' + rootAttr + '></a-entity>' +
-        '<a-entity id="cabinet-holder" smooth-anchor></a-entity>' +
       '</a-scene>');
 
     sceneEl = $('scene');
     rootEl = $('root');
-    holderEl = $('cabinet-holder');
 
     if (DEMO) document.body.classList.add('demo-mode');
 
@@ -675,13 +652,10 @@
 
       var tapStart = null;
       var lastTouchEndMs = 0;
-      var dragLast = null;
-      var pinchStartDist = null;
-      var pinchStartScale = null;
 
       function handleTapAt(clientX, clientY) {
         if (!doorsOpen || currentId || !$('panel').classList.contains('panel-closed')) return;
-        if (holderEl && holderEl.object3D && !holderEl.object3D.visible) return;
+        if (rootEl && rootEl.object3D && !rootEl.object3D.visible) return;
         var camEl = document.querySelector('a-camera');
         var camObj = camEl && camEl.getObject3D('camera');
         if (!camObj) return;
@@ -716,53 +690,14 @@
       }
 
       canvas.addEventListener('touchstart', function (ev) {
-        if (!ev.touches) return;
-        if (ev.touches.length === 1) {
+        if (ev.touches && ev.touches.length === 1) {
           tapStart = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, t: Date.now() };
-          dragLast = { x: ev.touches[0].clientX, y: ev.touches[0].clientY };
-          pinchStartDist = null;
-        } else if (ev.touches.length === 2 && !DEMO && anchorState === 'locked' && holderEl && holderEl.object3D) {
+        } else {
           tapStart = null;
-          dragLast = null;
-          var dx = ev.touches[0].clientX - ev.touches[1].clientX;
-          var dy = ev.touches[0].clientY - ev.touches[1].clientY;
-          pinchStartDist = Math.hypot(dx, dy);
-          pinchStartScale = holderEl.object3D.scale.x;
-        }
-      }, { passive: true });
-
-      canvas.addEventListener('touchmove', function (ev) {
-        if (DEMO || anchorState !== 'locked' || !holderEl || !holderEl.object3D || !holderEl.object3D.visible) return;
-        if (!$('panel').classList.contains('panel-closed')) return;
-
-        if (ev.touches.length === 2 && pinchStartDist && pinchStartScale) {
-          var dx = ev.touches[0].clientX - ev.touches[1].clientX;
-          var dy = ev.touches[0].clientY - ev.touches[1].clientY;
-          var dist = Math.hypot(dx, dy);
-          if (dist > 10) {
-            var factor = Math.min(Math.max(dist / pinchStartDist, 0.55), 2.4);
-            var nextS = pinchStartScale * factor;
-            holderEl.object3D.scale.set(nextS, nextS, nextS);
-          }
-        } else if (ev.touches.length === 1 && dragLast) {
-          var tx = ev.touches[0].clientX;
-          var ty = ev.touches[0].clientY;
-          var moveX = tx - dragLast.x;
-          var moveY = ty - dragLast.y;
-          dragLast = { x: tx, y: ty };
-          if (tapStart && Math.hypot(tx - tapStart.x, ty - tapStart.y) < 12) return;
-
-          var depth = Math.max(Math.abs(holderEl.object3D.position.z), 0.5);
-          var rect = canvas.getBoundingClientRect();
-          var span = depth * 0.95;
-          holderEl.object3D.position.x += (moveX / Math.max(rect.height, 1)) * span;
-          holderEl.object3D.position.y -= (moveY / Math.max(rect.height, 1)) * span;
         }
       }, { passive: true });
 
       canvas.addEventListener('touchend', function (ev) {
-        pinchStartDist = null;
-        dragLast = null;
         if (!tapStart || !ev.changedTouches || !ev.changedTouches.length) return;
         var touch = ev.changedTouches[0];
         var dx = touch.clientX - tapStart.x;
@@ -796,7 +731,7 @@
       id: 'cabinet',
       position: (-CFG.sheet.fromLeftCm * U) + ' ' + (-CFG.sheet.fromBottomCm * U) + ' 0',
       scale: U + ' ' + U + ' ' + U
-    }, holderEl);
+    }, rootEl);
 
     box(T, H, D, T / 2, H / 2, -D / 2, col.body, group, 'body');
     box(T, H, D, W - T / 2, H / 2, -D / 2, col.body, group, 'body');
@@ -1038,8 +973,6 @@
     var s0 = (rec.h * shelf.worldScaleY) / VH;
     viewerStartScale = s0;
 
-    // Calculem la posició de vol proporcional a la distància real de l'armari i al FOV
-    // de la càmera perquè MAI quedi tallat pel pla 'near' de MindAR ni massa petit/gran.
     var camObj = camEl.getObject3D('camera');
     var dist = Math.max(Math.abs(p.z), 1.5);
     var targetDist = dist * 0.62;
@@ -1374,16 +1307,11 @@
         rootEl.addEventListener('targetFound', function () {
           targetCurrentlyVisible = true;
           if (anchorState === 'scanning') {
-            var comp = holderEl && holderEl.components && holderEl.components['smooth-anchor'];
-            if (comp) comp.snapToTarget();
             setAnchorState('settling');
           }
         });
         rootEl.addEventListener('targetLost', function () {
           targetCurrentlyVisible = false;
-          if (anchorState === 'settling' && everWasReady) {
-            setAnchorState('locked');
-          }
         });
       }
     } catch (err) {
