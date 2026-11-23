@@ -154,7 +154,6 @@
     if (!THREE) return null;
     var rnd = seededRand(303);
 
-    // 1. Textura de relleu (bump) de tapa dura / tela editorial + plec del llom
     var coverBumpCv = document.createElement('canvas');
     coverBumpCv.width = 256;
     coverBumpCv.height = 256;
@@ -162,7 +161,6 @@
     bctx.fillStyle = '#808080';
     bctx.fillRect(0, 0, 256, 256);
 
-    // Trama fina de tela / paper rugós
     for (var y = 0; y < 256; y += 2) {
       for (var x = 0; x < 256; x += 2) {
         var v = 120 + Math.floor(rnd() * 18) + (((x + y) % 4 === 0) ? 5 : -4);
@@ -170,7 +168,6 @@
         bctx.fillRect(x, y, 2, 2);
       }
     }
-    // Solc vertical del plec d'obertura prop del llom
     var crease = bctx.createLinearGradient(14, 0, 28, 0);
     crease.addColorStop(0, 'rgba(70,70,70,0)');
     crease.addColorStop(0.5, 'rgba(45,45,45,0.65)');
@@ -181,7 +178,6 @@
     var coverBump = new THREE.CanvasTexture(coverBumpCv);
     coverBump.wrapS = coverBump.wrapT = THREE.RepeatWrapping;
 
-    // 2. Textura de fulls apilats (es veu als cantells del llibre)
     var pagesCv = document.createElement('canvas');
     pagesCv.width = 128;
     pagesCv.height = 256;
@@ -279,7 +275,6 @@
     return (r * 299 + g * 587 + b * 114) / 1000 > 165;
   }
 
-  // Construeix un llibre 3D realista (tapa frontal amb portada integrada, tapa posterior, llom i fulls)
   function buildBookMesh(parent, b, w, h, d, clickable, coverImg) {
     registerBookPartComponent();
     var shared = getBookSharedAssets();
@@ -299,7 +294,6 @@
     var pageW = w - pageInset;
     var pageD = d - coverThick * 2;
 
-    // Bloc de fulls color crema (amb textura de fulles apilades als cantells)
     var pagesAttrs = {
       width: pageW,
       height: pageH,
@@ -308,9 +302,7 @@
       color: '#f4efe4'
     };
     if (pagesKey) pagesAttrs['book-part'] = pagesKey;
-    var pages = el('a-box', pagesAttrs, parent);
 
-    // Tapa davantera (la cara +Z porta directament la textura de la portada)
     var frontAttrs = {
       width: w,
       height: h,
@@ -319,13 +311,7 @@
       color: b.color
     };
     if (frontKey) frontAttrs['book-part'] = frontKey;
-    if (clickable) {
-      frontAttrs['class'] = 'clickable';
-      frontAttrs['data-id'] = b.id;
-    }
-    var front = el('a-box', frontAttrs, parent);
 
-    // Tapa posterior
     var backAttrs = {
       width: w,
       height: h,
@@ -334,9 +320,7 @@
       color: b.color
     };
     if (baseKey) backAttrs['book-part'] = baseKey;
-    var back = el('a-box', backAttrs, parent);
 
-    // Llom (cantell esquerre, lleugerament encastat en Z perquè no trepitgi la portada frontal)
     var spineAttrs = {
       width: coverThick * 1.15,
       height: h,
@@ -345,6 +329,21 @@
       color: b.color
     };
     if (baseKey) spineAttrs['book-part'] = baseKey;
+
+    if (clickable) {
+      pagesAttrs['class'] = 'clickable';
+      pagesAttrs['data-id'] = b.id;
+      frontAttrs['class'] = 'clickable';
+      frontAttrs['data-id'] = b.id;
+      backAttrs['class'] = 'clickable';
+      backAttrs['data-id'] = b.id;
+      spineAttrs['class'] = 'clickable';
+      spineAttrs['data-id'] = b.id;
+    }
+
+    var pages = el('a-box', pagesAttrs, parent);
+    var front = el('a-box', frontAttrs, parent);
+    var back = el('a-box', backAttrs, parent);
     var spine = el('a-box', spineAttrs, parent);
 
     return {
@@ -379,6 +378,76 @@
 
     sceneEl = $('scene');
     rootEl = $('root');
+
+    if (DEMO) document.body.classList.add('demo-mode');
+
+    sceneEl.addEventListener('loaded', function () {
+      if (!DEMO && sceneEl.renderer) {
+        sceneEl.renderer.setClearColor(0x000000, 0);
+      }
+      var canvas = sceneEl.canvas;
+      if (!canvas || !window.AFRAME) return;
+
+      var tapStart = null;
+      function handleTapAt(clientX, clientY) {
+        if (!doorsOpen || !$('panel').classList.contains('panel-closed')) return;
+        var camEl = document.querySelector('a-camera');
+        var camObj = camEl && camEl.getObject3D('camera');
+        if (!camObj) return;
+
+        var rect = canvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        var ndc = new AFRAME.THREE.Vector2(
+          ((clientX - rect.left) / rect.width) * 2 - 1,
+          -((clientY - rect.top) / rect.height) * 2 + 1
+        );
+        var ray = new AFRAME.THREE.Raycaster();
+        ray.setFromCamera(ndc, camObj);
+
+        var targets = [];
+        var meshToId = new Map();
+        for (var id in bookEls) {
+          var rec = bookEls[id];
+          if (!rec || !rec.g || !rec.g.object3D || !rec.g.object3D.visible) continue;
+          rec.g.object3D.traverse(function (obj) {
+            if (obj.isMesh) {
+              targets.push(obj);
+              meshToId.set(obj, id);
+            }
+          });
+        }
+        if (!targets.length) return;
+        var hits = ray.intersectObjects(targets, false);
+        if (hits.length > 0) {
+          var hitId = meshToId.get(hits[0].object);
+          if (hitId) openPanel(hitId);
+        }
+      }
+
+      canvas.addEventListener('touchstart', function (ev) {
+        if (ev.touches && ev.touches.length === 1) {
+          tapStart = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, t: Date.now() };
+        } else {
+          tapStart = null;
+        }
+      }, { passive: true });
+
+      canvas.addEventListener('touchend', function (ev) {
+        if (!tapStart || !ev.changedTouches || !ev.changedTouches.length) return;
+        var touch = ev.changedTouches[0];
+        var dx = touch.clientX - tapStart.x;
+        var dy = touch.clientY - tapStart.y;
+        var dt = Date.now() - tapStart.t;
+        tapStart = null;
+        if (Math.hypot(dx, dy) < 18 && dt < 500) {
+          handleTapAt(touch.clientX, touch.clientY);
+        }
+      }, { passive: true });
+
+      canvas.addEventListener('click', function (ev) {
+        handleTapAt(ev.clientX, ev.clientY);
+      });
+    }, { once: true });
   }
 
   // ------------------------------------------------------------------
@@ -389,60 +458,51 @@
     var W = c.widthCm, H = c.heightCm, D = c.depthCm, T = c.wallCm;
     var fs = c.frame.sideCm, ft = c.frame.topCm, fb = c.frame.bottomCm;
     var st = c.shelfThicknessCm;
-    var FD = 3;                                   // fondària del marc frontal
+    var FD = 3;
 
-    // L'origen del grup és la cantonada inferior-esquerra-davantera de l'armari.
     var group = el('a-entity', {
       id: 'cabinet',
       position: (-CFG.sheet.fromLeftCm * U) + ' ' + (-CFG.sheet.fromBottomCm * U) + ' 0',
       scale: U + ' ' + U + ' ' + U
     }, rootEl);
 
-    // Carcassa metàl·lica crema
-    box(T, H, D, T / 2, H / 2, -D / 2, col.body, group, 'body');              // costat esquerre
-    box(T, H, D, W - T / 2, H / 2, -D / 2, col.body, group, 'body');          // costat dret
-    box(W, T, D, W / 2, H - T / 2, -D / 2, col.body, group, 'body');          // tapa
-    box(W, T, D, W / 2, T / 2, -D / 2, col.body, group, 'body');              // base
-    box(W, H, T, W / 2, H / 2, -D + T / 2, col.inside, group, 'inside');      // fons amb nervadures
+    box(T, H, D, T / 2, H / 2, -D / 2, col.body, group, 'body');
+    box(T, H, D, W - T / 2, H / 2, -D / 2, col.body, group, 'body');
+    box(W, T, D, W / 2, H - T / 2, -D / 2, col.body, group, 'body');
+    box(W, T, D, W / 2, T / 2, -D / 2, col.body, group, 'body');
+    box(W, H, T, W / 2, H / 2, -D + T / 2, col.inside, group, 'inside');
 
-    // Marc frontal crema (amb relleu superior com a la foto real)
     box(W + 1.2, ft, FD + 0.8, W / 2, H - ft / 2, -FD / 2 + 0.4, col.body, group, 'body');
     box(W, fb, FD, W / 2, fb / 2, -FD / 2, col.body, group, 'body');
     box(fs, H, FD, fs / 2, H / 2, -FD / 2, col.body, group, 'body');
     box(fs, H, FD, W - fs / 2, H / 2, -FD / 2, col.body, group, 'body');
 
-    // Guies verticals interiors per als prestatges
     [T + 0.6, W - T - 0.6].forEach(function (gx) {
       [-(FD + 4), -(D - T - 4)].forEach(function (gz) {
         box(1.2, H - ft - fb, 0.8, gx, H / 2, gz, col.inside, group, 'inside');
       });
     });
 
-    // Terra interior i prestatges gris-blavós
     var depthIn = D - T - FD;
     var zc = -(FD + depthIn / 2);
-    var ys = [fb].concat(c.shelvesFromBottomCm).concat([H - ft]);     // de baix a dalt
+    var ys = [fb].concat(c.shelvesFromBottomCm).concat([H - ft]);
     box(W - 2 * T, st, depthIn, W / 2, fb - st / 2, zc, col.shelf, group, 'shelf');
     for (var s = 1; s < ys.length - 1; s++) {
       box(W - 2 * T, st, depthIn, W / 2, ys[s], zc, col.shelf, group, 'shelf');
     }
 
-    // Portes metàl·liques marrons (pivoten sobre les frontisses exteriors)
     var dw = (W - 2 * fs - 0.6) / 2, dh = H - ft - fb - 0.6;
-    var handleY = 81 - fb;                                            // nanses a ~81 cm del terra
+    var handleY = 81 - fb;
     [-1, 1].forEach(function (side) {
       var hingeX = side === 1 ? W - fs : fs;
       var pivot = el('a-entity', { position: hingeX + ' ' + (fb + 0.3) + ' -1.2' }, group);
 
-      // Fulla principal de la porta
       box(dw, dh, 1.8, -side * (dw / 2 + 0.15), dh / 2, 0, col.door, pivot, 'door');
 
-      // Nervadures verticals estampades a la cara INTERIOR de cada porta
       [-dw * 0.32, -dw * 0.68].forEach(function (ribOffset) {
         box(2.2, dh - 8, 0.5, side * ribOffset, dh / 2, -1.05, col.door, pivot, 'door');
       });
 
-      // Frontisses cilíndriques exteriors (dalt i baix)
       [14, dh - 14].forEach(function (hy) {
         el('a-cylinder', {
           radius: 0.7, height: 6.5,
@@ -452,13 +512,11 @@
         }, group);
       });
 
-      // Nanses cromades en forma de C amb bases rectangulars
       var hx = -side * (dw - 5.2);
       box(1.6, 13.5, 1.5, hx, handleY, 3.0, col.handle, pivot, 'handle');
       box(2.2, 2.6, 2.8, hx, handleY + 6.2, 1.7, col.handle, pivot, 'handle');
       box(2.2, 2.6, 2.8, hx, handleY - 6.2, 1.7, col.handle, pivot, 'handle');
 
-      // Baldó cromat central
       if (side === 1) {
         box(5.6, 4.2, 1.5, -dw + 1.8, 97 - fb, 1.6, col.handle, pivot, 'handle');
         box(4.2, 1.2, 1.8, -dw + 0.4, 97 - fb, 2.2, col.handle, pivot, 'handle');
@@ -466,7 +524,6 @@
       doors.push({ pivot: pivot, deg: side * CFG.doorOpenDeg });
     });
 
-    // Llibres: booksPerRow (de dalt a baix) reparteix els llibres pels forats
     var rows = ys.length - 1;
     var idx = 0;
     for (var r = 0; r < rows; r++) {
@@ -530,8 +587,6 @@
     if (b.portada) loadCover(b, rec);
   }
 
-  // Si existeix la imatge de la portada, el llibre agafa EXACTAMENT la seva proporció
-  // i l'aplica directament sobre la cara frontal de la tapa (sense plans superposats).
   function loadCover(b, rec) {
     var img = new Image();
     img.onload = function () {
@@ -542,7 +597,6 @@
       rec.w = w; rec.h = h;
       rec.coverImg = img;
 
-      // Reconstruir geometria amb la proporció exacta i la textura integrada
       while (rec.g.firstChild) rec.g.removeChild(rec.g.firstChild);
       var parts = buildBookMesh(rec.g, b, w, h, rec.d, true, img);
       rec.parts = parts;
@@ -629,7 +683,7 @@
     var p = getShelfLocalPosInCamera(rec, camEl);
 
     var VH = 0.62, VW = VH * (rec.w / rec.h), D = VH * 0.085;
-    var s0 = (rec.h * U) / VH;                      // comença amb la mida exacta del llibre a l'armari
+    var s0 = (rec.h * U) / VH;
     var v = el('a-entity', {
       position: p.x + ' ' + p.y + ' ' + p.z,
       scale: s0 + ' ' + s0 + ' ' + s0
@@ -661,7 +715,7 @@
         'property: rotation; from: 2 -8 -1.5; to: -1 8 1.5; dir: alternate; loop: true; dur: 3200; easing: easeInOutSine');
     }, { once: true });
 
-    rec.g.setAttribute('visible', false);           // el llibre surt del prestatge
+    rec.g.setAttribute('visible', false);
     viewerEl = v;
     shownId = id;
   }
@@ -734,7 +788,7 @@
     renderPanel();
     $('panel').classList.add('panel-closed');
     $('panel').setAttribute('aria-hidden', 'true');
-    showViewer(id);                                  // animació: el llibre vola cap a la càmera
+    showViewer(id);
     clearTimeout(openPanel._t);
     openPanel._t = setTimeout(function () {
       if (currentId === id) {
@@ -749,7 +803,7 @@
     $('panel').classList.add('panel-closed');
     $('panel').setAttribute('aria-hidden', 'true');
     currentId = null;
-    flyBackViewer();                                 // animació: el llibre torna al seu prestatge
+    flyBackViewer();
   }
 
   function renderPanel() {
@@ -873,7 +927,6 @@
   }
 
   function init() {
-    // 1. Connectem els botons primer perquè mai quedin bloquejats
     if ($('start')) $('start').addEventListener('click', startAR);
     if ($('close')) $('close').addEventListener('click', closePanel);
     if ($('p-pick')) $('p-pick').addEventListener('click', pickCurrent);
@@ -920,7 +973,6 @@
 
     updateSplashStats();
 
-    // 2. Construïm l'escena 3D i l'armari amb captura d'errors
     try {
       buildScene();
       buildCabinet();
@@ -940,7 +992,6 @@
       showError("Error carregant l'escena 3D: " + (err && err.message ? err.message : err));
     }
 
-    // 3. Connectem la base de dades
     if (window.Data && window.Data.mode === 'local') {
       var tag = $('mode-tag');
       if (tag) {
